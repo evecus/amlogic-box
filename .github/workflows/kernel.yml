@@ -69,8 +69,6 @@ jobs:
       - name: Embed WiFi/BT firmware into kernel (仓库有 kernel-firmware/brcm 才启用)
         working-directory: linux
         run: |
-          # 全内建内核在 rootfs 挂载前就 probe WiFi/BT,固件必须嵌进 Image 本体
-          # 第一期有线网先行,无 kernel-firmware 目录则跳过;二期补 wifi 时放入固件即可
           if [ -d ../kernel-firmware/brcm ] && ls ../kernel-firmware/brcm/* >/dev/null 2>&1; then
             FWLIST=$(cd ../kernel-firmware/brcm && ls | sed 's|^|brcm/|' | tr '\n' ' ')
             ./scripts/config --set-str CONFIG_EXTRA_FIRMWARE "$FWLIST"
@@ -78,7 +76,7 @@ jobs:
             make ARCH=arm64 olddefconfig
             echo "已嵌入固件: $FWLIST"
           else
-            echo "!! kernel-firmware/brcm 不存在或为空,跳过固件内嵌 (第一期: 有线网先行)"
+            echo "!! kernel-firmware/brcm 不存在或为空,跳过固件内嵌"
           fi
 
       - name: Build Image
