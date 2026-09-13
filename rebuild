@@ -6,6 +6,8 @@ set -euo pipefail
 # 移植来源:
 #   - ophub/amlogic-s9xxx-armbian 的 rebuild (启动链: 原厂 bootloader -> autoscript -> 按 uEnv.txt 直接 booti;
 #     内核已打 TEXT_OFFSET(0x0108) 补丁, 与 ophub 官方镜像一致, 不需要 u-boot.ext 链载)
+#     eMMC 启动链: 原厂 bootloader -> start_emmc_autoscript(mmc 1) -> emmc_autoscript -> 按 eMMC 上的 uEnv.txt booti;
+#     因此 bootfs 必须带 emmc_autoscript (install-emmc 的 rm s9*/aml* 不删它, eMMC 上只保留它)
 #   - panther-x2-rebuild 的仓库结构与流程骨架 (rootfs 底座定制/自检/产物发布)
 # 宗旨: 去掉 armbian/ophub 内核, 内核来自外部 linux-image deb (内置 dtb/modules 的 builtin 内核),
 #       dtb 与 u-boot 由本仓库提供, rootfs 内带 install-emmc 供写入 eMMC。
@@ -239,6 +241,8 @@ for ov in $(awk -F: '!/^#/ {gsub(/[[:space:]]/,""); if ($7 != "" && $7 != "NA") 
 done
 cp "${SCRIPT_DIR}/bootfs-base/aml_autoscript"    "$BOOT_MNT/"
 cp "${SCRIPT_DIR}/bootfs-base/s905_autoscript"   "$BOOT_MNT/"
+# emmc_autoscript: eMMC 启动唯一入口 (N1 原厂 uboot 的 mmc 1 = eMMC), install-emmc 删 s9*/aml* 时不会删它
+cp "${SCRIPT_DIR}/bootfs-base/emmc_autoscript"   "$BOOT_MNT/"
 
 cat > "$BOOT_MNT/uEnv.txt" << EOF
 LINUX=/zImage
@@ -249,7 +253,7 @@ EOF
 echo "--- uEnv.txt ---"; cat "$BOOT_MNT/uEnv.txt"; echo "----------------"
 
 # bootfs 自检 (挂载状态下): 缺任一关键文件直接失败
-for f in zImage uInitrd uEnv.txt "${UBOOT_OVERLOAD}" aml_autoscript s905_autoscript "dtb/amlogic/${FDTFILE}"; do
+for f in zImage uInitrd uEnv.txt "${UBOOT_OVERLOAD}" aml_autoscript s905_autoscript emmc_autoscript "dtb/amlogic/${FDTFILE}"; do
     [[ -f "$BOOT_MNT/$f" ]] || die "bootfs 缺少关键文件: $f"
 done
 
