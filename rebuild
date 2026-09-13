@@ -1,0 +1,319 @@
+#!/bin/bash
+set -euo pipefail
+#================================================================================================
+# amlogic-rebuild — 为晶晨盒子(Panther X2 rebuild 流程的 amlogic 版)构建可启动镜像
+#
+# 移植来源:
+#   - ophub/amlogic-s9xxx-armbian 的 rebuild (启动链: 原厂 bootloader -> u-boot.ext -> uEnv.txt)
+#   - panther-x2-rebuild 的仓库结构与流程骨架 (rootfs 底座定制/自检/产物发布)
+# 宗旨: 去掉 armbian/ophub 内核, 内核来自外部 linux-image deb (内置 dtb/modules 的 builtin 内核),
+#       dtb 与 u-boot 由本仓库提供, rootfs 内带 install-emmc 供写入 eMMC。
+#
+# 用法:
+#   sudo BOARD=phicomm-n1 KERNEL_DEB_URL=... ROOTFS_URL=... bash rebuild
+# 板级配置见 boards.conf; 启动方式严格 uEnv.txt (LINUX/INITRD/FDT/APPEND)。
+#================================================================================================
+
+BOARD="${BOARD:?需要 BOARD (phicomm-n1|cm311-1a-yst|m302a|wxy-oes)}"
+KERNEL_DEB_URL="${KERNEL_DEB_URL:?需要 KERNEL_DEB_URL}"
+ROOTFS_URL="${ROOTFS_URL:?需要 ROOTFS_URL}"
+ROOT_MB="${ROOT_MB:-2560}"
+ROOT_PASS="${ROOT_PASS:-1234}"
+SSH_PUBKEY="${SSH_PUBKEY:-}"
+OUT="${OUT:-out}"
+SKIP_MB=4        # amlogic: MBR + 预留 4MiB (原厂 uboot 环境/uboot 参数区)
+BOOT_MB=256      # bootfs 固定 256MiB (FAT32)
+# 脚本所在目录(仓库根) — 必须在任何 cd 之前确定
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+step() { echo -e "\n[STEPS] $1"; }
+have() { command -v "$1" >/dev/null 2>&1; }
+die() { echo "!! $1"; exit 1; }
+[[ $(id -u) -eq 0 ]] || { echo "需要 root"; exit 1; }
+have openssl || { echo "需要 openssl"; exit 1; }
+
+step "0/7 解析板级配置 (${BOARD})"
+BOARD_LINE="$(grep -E "^${BOARD}:" "${SCRIPT_DIR}/boards.conf" | head -1)"
+[[ -n "${BOARD_LINE}" ]] || die "boards.conf 中没有机型: ${BOARD}"
+# 仅压缩冒号两侧空白, 保留 EXTRA_APPEND 内部空格
+IFS=':' read -r MODEL_ID MODEL_NAME SOC FAMILY FDTFILE UBOOT_OVERLOAD BOOTLOADER_IMG EXTRA_APPEND \
+    <<< "$(echo "${BOARD_LINE#*:}" | sed 's/[[:space:]]*:[[:space:]]*/:/g')"
+MODEL_ID="${MODEL_ID// /}"   # 首字段无内部空格, 清掉前导空白
+[[ -n "${FDTFILE}" && -n "${UBOOT_OVERLOAD}" ]] || die "机型 ${BOARD} 配置不完整"
+DTB="${SCRIPT_DIR}/dtb/amlogic/${FDTFILE}"
+[[ -f "$DTB" ]] || die "缺少 ${DTB}"
+UBOOT_BIN="${SCRIPT_DIR}/u-boot/${UBOOT_OVERLOAD}"
+[[ -f "$UBOOT_BIN" ]] || die "缺少 ${UBOOT_BIN}"
+BOOTLOADER_SRC=""
+if [[ "${BOOTLOADER_IMG}" != "NA" ]]; then
+    BOOTLOADER_SRC="${SCRIPT_DIR}/u-boot/${BOOTLOADER_IMG}"
+    [[ -f "$BOOTLOADER_SRC" ]] || die "缺少 ${BOOTLOADER_SRC}"
+fi
+echo "MODEL_ID=${MODEL_ID} SOC=${SOC} FAMILY=${FAMILY}"
+echo "FDTFILE=${FDTFILE}"
+echo "UBOOT_OVERLOAD=${UBOOT_OVERLOAD}  BOOTLOADER_IMG=${BOOTLOADER_IMG}"
+
+WORK="$(mktemp -d /tmp/amlbuild.XXXXXX)"
+mkdir -p "$OUT"
+LOOP="" ; CLEANUP() {
+    [[ -n "${ROOT_MNT:-}" ]] && mountpoint -q "$ROOT_MNT" && umount "$ROOT_MNT"
+    [[ -n "${BOOT_MNT:-}" ]] && mountpoint -q "$BOOT_MNT" && umount "$BOOT_MNT"
+    [[ -n "${SRC_MNT:-}"  ]] && mountpoint -q "$SRC_MNT"  && umount "$SRC_MNT"
+    [[ -n "$LOOP" ]] && losetup -d "$LOOP" 2>/dev/null || true
+}
+trap CLEANUP EXIT
+
+step "1/7 安装依赖"
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq dosfstools e2fsprogs parted wget gzip xz-utils kmod cpio python3 > /dev/null
+
+step "2/7 下载并解包内核 deb"
+cd "$WORK"
+wget -q --show-progress -O kernel.deb "$KERNEL_DEB_URL"
+rm -rf kernelpkg && mkdir kernelpkg
+dpkg-deb -x kernel.deb kernelpkg
+# KVER 从 deb control 的 Version 字段读取 (内核 builtin, deb 不带 lib/modules)
+KVER="$(dpkg-deb -f kernel.deb Version)"
+[[ -n "$KVER" ]] || die "无法从 deb control 读取 Version (KVER)"
+# 内核镜像: 优先 boot/zImage (flippy 惯例命名), 兼容 boot/Image 与 boot/vmlinuz-*
+KERNEL_SRC=""
+for f in kernelpkg/boot/zImage kernelpkg/boot/Image kernelpkg/boot/vmlinuz-*; do
+    [[ -f "$f" ]] && { KERNEL_SRC="$f"; break; }
+done
+[[ -n "$KERNEL_SRC" ]] || die "deb 中未找到内核镜像 (boot/zImage|Image|vmlinuz-*)"
+[[ -f "kernelpkg/boot/uInitrd" ]] || die "deb 中未找到 boot/uInitrd (本流程严格使用 deb 自带 uInitrd)"
+echo "KVER = ${KVER}"
+echo "kernel = ${KERNEL_SRC}"
+
+step "3/7 下载并提取 rootfs 底座"
+if [[ "$ROOTFS_URL" == *.xz ]]; then
+    wget -q --show-progress -O rootfs.img.xz "$ROOTFS_URL"
+    xz -d -f -T0 rootfs.img.xz
+else
+    wget -q --show-progress -O rootfs.img.gz "$ROOTFS_URL"
+    gunzip -f rootfs.img.gz
+fi
+SRC_LOOP="$(losetup -P -f --show rootfs.img)"
+SRC_MNT="$WORK/src_root"
+mkdir -p "$SRC_MNT"
+if [[ -e "${SRC_LOOP}p2" ]]; then mount "${SRC_LOOP}p2" "$SRC_MNT"; else mount "${SRC_LOOP}p1" "$SRC_MNT"; fi
+[[ -d "$SRC_MNT/etc" ]] || die "rootfs 镜像内容异常(未找到 /etc)"
+echo "rootfs 底座: $(grep PRETTY_NAME "$SRC_MNT/etc/os-release" | cut -d'"' -f2)"
+OS_ID=$(grep -oE '^ID=.*' "$SRC_MNT/etc/os-release" | cut -d= -f2 | tr -d '"' | head -1)
+OS_CODENAME=$(grep -oE '^VERSION_CODENAME=.*' "$SRC_MNT/etc/os-release" | cut -d= -f2 | tr -d '"' | head -1)
+OS_ID=${OS_ID:-unknown}; OS_CODENAME=${OS_CODENAME:-unknown}
+echo "OS: ${OS_ID} / ${OS_CODENAME}"
+
+step "4/7 定制 rootfs (root 密码 / SSH / 网络 / eMMC 安装工具)"
+RS="$WORK/rootfs"
+cp -a "$SRC_MNT/." "$RS/"
+umount "$SRC_MNT"; losetup -d "$SRC_LOOP"; SRC_MNT=""
+
+# root 密码 (直接改 /etc/shadow, 无需 chroot; openssl 生成 SHA512-crypt)
+HASH="$(openssl passwd -6 "$ROOT_PASS")"
+python3 - "$RS/etc/shadow" "$HASH" << 'PYEOF'
+import sys
+path, h = sys.argv[1], sys.argv[2]
+out = []
+for line in open(path):
+    if line.startswith("root:"):
+        f = line.split(":")
+        f[1] = h
+        line = ":".join(f)
+    out.append(line)
+open(path, "w").writelines(out)
+PYEOF
+
+# SSH 公钥 (可选)
+if [[ -n "$SSH_PUBKEY" ]]; then
+    mkdir -p "$RS/root/.ssh"
+    echo "$SSH_PUBKEY" > "$RS/root/.ssh/authorized_keys"
+    chmod 600 "$RS/root/.ssh/authorized_keys"
+fi
+
+# 有线网口 DHCP (systemd-networkd) + DNS
+mkdir -p "$RS/etc/systemd/network" "$RS/etc/systemd/system/multi-user.target.wants"
+cat > "$RS/etc/systemd/network/10-eth0.network" << 'EOF'
+[Match]
+Name=eth0 end0
+
+[Network]
+DHCP=yes
+EOF
+for s in systemd-networkd.service systemd-resolved.service ssh.service; do
+    ln -sf /usr/lib/systemd/system/${s} "$RS/etc/systemd/system/multi-user.target.wants/${s}"
+done
+rm -f "$RS/etc/resolv.conf"; echo "nameserver 223.5.5.5" > "$RS/etc/resolv.conf"
+
+# eMMC 安装/调度脚本 — 来自 rootfs-overlay (install-emmc/ampart/balethirq/sysctl 等, 移植自 ophub)
+OVERLAY="${SCRIPT_DIR}/rootfs-overlay"
+cp -a "$OVERLAY/." "$RS/"
+chmod 755 "$RS/usr/sbin/install-emmc" \
+          "$RS/usr/sbin/balethirq.pl" \
+          "$RS/usr/bin/oes_sata_leds.sh" \
+          "$RS/etc/custom_service/start_service.sh"
+chmod 755 "$RS/usr/bin/ampart"
+chmod 644 "$RS/etc/model_database.conf" "$RS/etc/balance_irq" \
+          "$RS/etc/sysctl.conf" "$RS/etc/modprobe.d/brcmfmac.conf"
+
+# start_service.sh (移植自 ophub) — 挂到 /etc/rc.local, 由 systemd rc-local.service 开机执行:
+#   dmesg 静音 / 网卡 IRQ 绑核(balethirq) / UDP GRO 转发加速 / WXY-OES SATA 灯控
+if [[ -f "$RS/etc/rc.local" ]]; then
+    grep -q "start_service.sh" "$RS/etc/rc.local" || \
+        sed -i '/^exit 0/i\bash /etc/custom_service/start_service.sh &' "$RS/etc/rc.local"
+    chmod 755 "$RS/etc/rc.local"
+else
+    cat > "$RS/etc/rc.local" << 'EOF'
+#!/bin/sh
+bash /etc/custom_service/start_service.sh &
+exit 0
+EOF
+    chmod 755 "$RS/etc/rc.local"
+fi
+
+# N1 等带安卓 bootloader 的机型: 把 bootloader 预置到 /usr/lib/u-boot/, install-emmc 写 eMMC 时使用
+mkdir -p "$RS/usr/lib/u-boot"
+if [[ -n "${BOOTLOADER_SRC}" ]]; then
+    cp "${BOOTLOADER_SRC}" "$RS/usr/lib/u-boot/${BOOTLOADER_IMG}"
+    echo "已预置 bootloader: /usr/lib/u-boot/${BOOTLOADER_IMG}"
+fi
+
+# 内核全内置 (无 modules): 清掉底座自带的旧内核模块, 不做 depmod
+rm -rf "$RS/lib/modules/"* 2>/dev/null || true
+rm -rf "$RS/usr/lib/modules/"* 2>/dev/null || true
+
+# 关闭 update-initramfs (uInitrd 由 deb 提供, 设备上不重建)
+if [[ -f "$RS/etc/initramfs-tools/update-initramfs.conf" ]]; then
+    sed -i "s|^update_initramfs=.*|update_initramfs=no|g" "$RS/etc/initramfs-tools/update-initramfs.conf"
+fi
+
+# nand-sata-install 对晶晨盒子无效且会写错引导, 移除 (对齐 ophub rebuild)
+rm -rf "$RS/usr/lib/nand-sata-install" "$RS/usr/lib/bak-nand-sata-install" 2>/dev/null || true
+
+# rootfs 体积守卫: 防止 ROOT_MB 给小了导致拷贝中途爆盘
+USED_MB=$(du -sm "$RS" | awk '{print $1}')
+if [[ "$USED_MB" -gt $((ROOT_MB - 200)) ]]; then
+    echo "!! rootfs 实际占用 ${USED_MB}MiB, 接近/超过 root 分区 ${ROOT_MB}MiB"
+    echo "!! 请把 root_mb 调大 (建议 $((USED_MB + 800)) 以上), 本次继续但可能失败"
+fi
+
+step "5/7 创建目标镜像 (MBR: ${SKIP_MB}M 间隙 + ${BOOT_MB}M boot(FAT32) + ${ROOT_MB}M root)"
+IMG="${BOARD}-${OS_ID}-${OS_CODENAME}-${KVER}.img"
+rm -f "$IMG"
+truncate -s $((SKIP_MB + BOOT_MB + ROOT_MB))M "$IMG"
+parted -s "$IMG" mklabel msdos
+parted -s "$IMG" mkpart primary fat32 ${SKIP_MB}MiB $((SKIP_MB + BOOT_MB - 1))MiB
+parted -s "$IMG" mkpart primary ext4 $((SKIP_MB + BOOT_MB))MiB 100%
+
+step "6/7 填充 boot/root 分区"
+LOOP="$(losetup -P -f --show "$IMG")"
+mkfs.vfat -F 32 -n "BOOT" "${LOOP}p1" > /dev/null
+mkfs.ext4 -F -q -L ROOTFS -b 4k -m 0 "${LOOP}p2"
+BOOT_MNT="$WORK/boot_mnt"; ROOT_MNT="$WORK/root_mnt"
+mkdir -p "$BOOT_MNT" "$ROOT_MNT"
+mount "${LOOP}p1" "$BOOT_MNT"
+mount "${LOOP}p2" "$ROOT_MNT"
+
+BOOT_UUID="$(lsblk -no UUID "${LOOP}p1" | head -1)"
+ROOT_UUID="$(lsblk -no UUID "${LOOP}p2" | head -1)"
+
+# bootfs (严格 uEnv.txt, flippy mainline u-boot 与原厂 autoscript 均按此引导):
+#   u-boot.ext        — 本板 UBOOT_OVERLOAD 链载目标
+#   u-boot-*.bin 全量 — install-emmc 数字选型时按所选板检查 /boot/${UBOOT_OVERLOAD}
+#   dtb/amlogic 全量  — 同上, 选型后按 FDTFILE 取用
+#   zImage uInitrd aml_autoscript s905_autoscript uEnv.txt
+cp "$KERNEL_SRC" "$BOOT_MNT/zImage"
+cp "kernelpkg/boot/uInitrd" "$BOOT_MNT/uInitrd"
+mkdir -p "$BOOT_MNT/dtb/amlogic"
+cp "${SCRIPT_DIR}"/dtb/amlogic/*.dtb "$BOOT_MNT/dtb/amlogic/"
+cp "$UBOOT_BIN" "$BOOT_MNT/u-boot.ext"
+# 拷贝全部机型的 UBOOT_OVERLOAD (boards.conf 第 7 列), install-emmc 数字选型时用
+for ov in $(awk -F: '!/^#/ {gsub(/[[:space:]]/,""); if ($7 != "" && $7 != "NA") print $7}' "${SCRIPT_DIR}/boards.conf"); do
+    cp "${SCRIPT_DIR}/u-boot/${ov}" "$BOOT_MNT/"
+done
+cp "${SCRIPT_DIR}/bootfs-base/aml_autoscript"    "$BOOT_MNT/"
+cp "${SCRIPT_DIR}/bootfs-base/s905_autoscript"   "$BOOT_MNT/"
+
+cat > "$BOOT_MNT/uEnv.txt" << EOF
+LINUX=/zImage
+INITRD=/uInitrd
+FDT=/dtb/amlogic/${FDTFILE}
+APPEND=root=UUID=${ROOT_UUID} rootflags=data=writeback rw rootwait rootfstype=ext4 console=ttyAML0,115200 console=tty0 no_console_suspend consoleblank=0 fsck.fix=yes fsck.repair=yes net.ifnames=0 max_loop=128 cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory swapaccount=1 ${EXTRA_APPEND}
+EOF
+echo "--- uEnv.txt ---"; cat "$BOOT_MNT/uEnv.txt"; echo "----------------"
+
+# bootfs 自检 (挂载状态下): 缺任一关键文件直接失败
+for f in zImage uInitrd uEnv.txt u-boot.ext "${UBOOT_OVERLOAD}" aml_autoscript s905_autoscript "dtb/amlogic/${FDTFILE}"; do
+    [[ -f "$BOOT_MNT/$f" ]] || die "bootfs 缺少关键文件: $f"
+done
+
+# rootfs: 回填 fstab, 清理构建残留
+echo "UUID=${ROOT_UUID} / ext4 defaults,noatime 0 1" > "$RS/etc/fstab"
+echo "UUID=${BOOT_UUID} /boot vfat defaults 0 2"    >> "$RS/etc/fstab"
+rm -rf "$RS/debootstrap" "$RS/var/cache/apt/archives/"*.deb 2>/dev/null || true
+cp -a "$RS/." "$ROOT_MNT/"
+sync
+umount "$ROOT_MNT"; umount "$BOOT_MNT"; ROOT_MNT=""; BOOT_MNT=""
+
+step "7/7 写入 bootloader 并压缩"
+# 仅带安卓 bootloader 的机型 (Phicomm-N1) 写 0 扇区: 前 444 字节 + 从扇区 1 开始的正文
+# 其余机型不写 0 扇区 — USB 启动依赖板上原厂 uboot 链载 bootfs 里的 u-boot.ext
+if [[ -n "${BOOTLOADER_SRC}" ]]; then
+    dd if="${BOOTLOADER_SRC}" of="$LOOP" conv=fsync bs=1 count=444            status=none
+    dd if="${BOOTLOADER_SRC}" of="$LOOP" conv=fsync bs=512 skip=1 seek=1      status=none
+    echo "已写入 bootloader: ${BOOTLOADER_IMG} (扇区 1)"
+else
+    echo "本机型不写 0 扇区 bootloader (USB 启动由板上原厂 uboot 链载 u-boot.ext)"
+fi
+sync
+losetup -d "$LOOP"; LOOP=""
+
+step "7b/7 镜像自检 (debugfs, 不挂载)"
+PASS=0; FAIL=0
+chk() {
+    if [[ "$2" -eq 1 ]]; then echo "  [ OK ] $1"; PASS=$((PASS+1))
+    else echo "  [FAIL] $1"; FAIL=$((FAIL+1)); fi
+}
+dd if="$IMG" of="$WORK/p2.img" bs=1M skip=$((SKIP_MB + BOOT_MB)) count=$ROOT_MB status=none
+debugfs -R "stat /sbin/init" "$WORK/p2.img" >/dev/null 2>&1 && r=1 || r=0
+chk "p2:/sbin/init (init 系统存在)" $r
+debugfs -R "stat /usr/sbin/install-emmc" "$WORK/p2.img" >/dev/null 2>&1 && r=1 || r=0
+chk "p2:/usr/sbin/install-emmc" $r
+debugfs -R "stat /usr/bin/ampart" "$WORK/p2.img" >/dev/null 2>&1 && r=1 || r=0
+chk "p2:/usr/bin/ampart" $r
+debugfs -R "stat /etc/model_database.conf" "$WORK/p2.img" >/dev/null 2>&1 && r=1 || r=0
+chk "p2:/etc/model_database.conf" $r
+debugfs -R "cat /etc/fstab" "$WORK/p2.img" 2>/dev/null | grep -q "$ROOT_UUID" && r=1 || r=0
+chk "p2:/etc/fstab 含 ROOT_UUID" $r
+[[ -n "${BOOTLOADER_SRC}" ]] && {
+    dd if="$IMG" bs=512 skip=1 count=1 status=none | cmp -s - <(dd if="${BOOTLOADER_SRC}" bs=512 skip=1 count=1 status=none) && r=1 || r=0
+    chk "img:扇区1 bootloader 已写入" $r
+}
+echo "自检结果: PASS=$PASS FAIL=$FAIL"
+[[ $FAIL -eq 0 ]] || echo "!! 存在 FAIL 项, 镜像大概率无法启动 — 优先解决 FAIL 再烧写"
+rm -f "$WORK/p2.img"
+
+xz -9 -T0 -f "$IMG"
+cp "$IMG.xz" "$OUT/" 2>/dev/null || mv "$IMG.xz" "$OUT/"
+cat > "$OUT/build-info.txt" << EOF
+board       : ${BOARD} (${MODEL_NAME}, ${SOC})
+model_id    : ${MODEL_ID}
+kernel      : ${KVER}
+os          : ${OS_ID} ${OS_CODENAME}
+rootfs_url  : ${ROOTFS_URL}
+kernel_deb  : ${KERNEL_DEB_URL}
+fdtfile     : ${FDTFILE}
+uboot_ext   : ${UBOOT_OVERLOAD}
+bootloader  : ${BOOTLOADER_IMG}
+build_date  : $(date -u '+%Y-%m-%d %H:%M UTC')
+EOF
+# 产物交还给调用用户(sudo 场景下避免 root 属主导致后续 mv 失败)
+if [[ -n "${SUDO_USER:-}" ]]; then
+    chown -R "${SUDO_USER}" "$OUT" 2>/dev/null || true
+fi
+echo ""
+echo "完成: ${OUT}/${IMG}.xz"
+echo "烧写: xzcat ${IMG}.xz | dd of=/dev/sdX bs=4M conv=fsync  (或 balenaEtcher)"
+echo "启动: USB 启动进入系统后执行 [ sudo install-emmc ] 写入 eMMC (运行中输入机型 ID 选择目标机)"
+echo "登录: root / ${ROOT_PASS} (串口 ttyAML0@115200 或 SSH, 首次登录后请修改)"
