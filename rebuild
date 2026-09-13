@@ -228,17 +228,23 @@ BOOT_UUID="$(lsblk -no UUID "${LOOP}p1" | head -1)"
 ROOT_UUID="$(lsblk -no UUID "${LOOP}p2" | head -1)"
 
 # bootfs (严格 uEnv.txt, 内核已打 TEXT_OFFSET 补丁, 原厂 uboot 经 autoscript 直接 booti, 对齐 ophub 官方镜像):
-#   u-boot-*.bin 全量 — install-emmc 数字选型时按所选板检查 /boot/${UBOOT_OVERLOAD}
-#   dtb/amlogic 全量  — 同上, 选型后按 FDTFILE 取用
-#   zImage uInitrd aml_autoscript s905_autoscript uEnv.txt
+#   仅当前机型的 dtb 与 UBOOT_OVERLOAD (机型在构建期已定, 不再全量打包四份)
+#   board.conf — install-emmc 读取的板级配置 (替代交互式机型选择)
+#   zImage uInitrd aml/s905/emmc_autoscript uEnv.txt
 cp "$KERNEL_SRC" "$BOOT_MNT/zImage"
 cp "kernelpkg/boot/uInitrd" "$BOOT_MNT/uInitrd"
 mkdir -p "$BOOT_MNT/dtb/amlogic"
-cp "${SCRIPT_DIR}"/dtb/amlogic/*.dtb "$BOOT_MNT/dtb/amlogic/"
-# 拷贝全部机型的 UBOOT_OVERLOAD (boards.conf 第 7 列), install-emmc 数字选型时用
-for ov in $(awk -F: '!/^#/ {gsub(/[[:space:]]/,""); if ($7 != "" && $7 != "NA") print $7}' "${SCRIPT_DIR}/boards.conf"); do
-    cp "${SCRIPT_DIR}/u-boot/${ov}" "$BOOT_MNT/"
-done
+cp "${SCRIPT_DIR}/dtb/amlogic/${FDTFILE}" "$BOOT_MNT/dtb/amlogic/"
+# 仅拷贝当前机型的 UBOOT_OVERLOAD, 并生成 install-emmc 读取的 board.conf
+cp "${SCRIPT_DIR}/u-boot/${UBOOT_OVERLOAD}" "$BOOT_MNT/"
+cat > "$BOOT_MNT/board.conf" << EOF
+BOX_ID=${MODEL_ID}
+MODEL_NAME=${MODEL_NAME}
+SOC=${SOC}
+FDTFILE=${FDTFILE}
+UBOOT_OVERLOAD=${UBOOT_OVERLOAD}
+BOOTLOADER_IMG=${BOOTLOADER_IMG}
+EOF
 cp "${SCRIPT_DIR}/bootfs-base/aml_autoscript"    "$BOOT_MNT/"
 cp "${SCRIPT_DIR}/bootfs-base/s905_autoscript"   "$BOOT_MNT/"
 # emmc_autoscript: eMMC 启动唯一入口 (N1 原厂 uboot 的 mmc 1 = eMMC), install-emmc 删 s9*/aml* 时不会删它
@@ -253,7 +259,7 @@ EOF
 echo "--- uEnv.txt ---"; cat "$BOOT_MNT/uEnv.txt"; echo "----------------"
 
 # bootfs 自检 (挂载状态下): 缺任一关键文件直接失败
-for f in zImage uInitrd uEnv.txt "${UBOOT_OVERLOAD}" aml_autoscript s905_autoscript emmc_autoscript "dtb/amlogic/${FDTFILE}"; do
+for f in zImage uInitrd uEnv.txt board.conf "${UBOOT_OVERLOAD}" aml_autoscript s905_autoscript emmc_autoscript "dtb/amlogic/${FDTFILE}"; do
     [[ -f "$BOOT_MNT/$f" ]] || die "bootfs 缺少关键文件: $f"
 done
 
@@ -324,5 +330,5 @@ fi
 echo ""
 echo "完成: ${OUT}/${IMG}.xz"
 echo "烧写: xzcat ${IMG}.xz | dd of=/dev/sdX bs=4M conv=fsync  (或 balenaEtcher)"
-echo "启动: USB 启动进入系统后执行 [ sudo install-emmc ] 写入 eMMC (运行中输入机型 ID 选择目标机)"
+echo "启动: USB 启动进入系统后执行 [ sudo install-emmc ] 写入 eMMC (机型由镜像内 board.conf 决定, 无需选择)"
 echo "登录: root / ${ROOT_PASS} (串口 ttyAML0@115200 或 SSH, 首次登录后请修改)"
