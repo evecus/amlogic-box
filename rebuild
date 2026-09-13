@@ -4,7 +4,8 @@ set -euo pipefail
 # amlogic-rebuild — 为晶晨盒子(Panther X2 rebuild 流程的 amlogic 版)构建可启动镜像
 #
 # 移植来源:
-#   - ophub/amlogic-s9xxx-armbian 的 rebuild (启动链: 原厂 bootloader -> u-boot.ext -> uEnv.txt)
+#   - ophub/amlogic-s9xxx-armbian 的 rebuild (启动链: 原厂 bootloader -> autoscript -> 按 uEnv.txt 直接 booti;
+#     内核已打 TEXT_OFFSET(0x0108) 补丁, 与 ophub 官方镜像一致, 不需要 u-boot.ext 链载)
 #   - panther-x2-rebuild 的仓库结构与流程骨架 (rootfs 底座定制/自检/产物发布)
 # 宗旨: 去掉 armbian/ophub 内核, 内核来自外部 linux-image deb (内置 dtb/modules 的 builtin 内核),
 #       dtb 与 u-boot 由本仓库提供, rootfs 内带 install-emmc 供写入 eMMC。
@@ -224,8 +225,7 @@ mount "${LOOP}p2" "$ROOT_MNT"
 BOOT_UUID="$(lsblk -no UUID "${LOOP}p1" | head -1)"
 ROOT_UUID="$(lsblk -no UUID "${LOOP}p2" | head -1)"
 
-# bootfs (严格 uEnv.txt, flippy mainline u-boot 与原厂 autoscript 均按此引导):
-#   u-boot.ext        — 本板 UBOOT_OVERLOAD 链载目标
+# bootfs (严格 uEnv.txt, 内核已打 TEXT_OFFSET 补丁, 原厂 uboot 经 autoscript 直接 booti, 对齐 ophub 官方镜像):
 #   u-boot-*.bin 全量 — install-emmc 数字选型时按所选板检查 /boot/${UBOOT_OVERLOAD}
 #   dtb/amlogic 全量  — 同上, 选型后按 FDTFILE 取用
 #   zImage uInitrd aml_autoscript s905_autoscript uEnv.txt
@@ -233,7 +233,6 @@ cp "$KERNEL_SRC" "$BOOT_MNT/zImage"
 cp "kernelpkg/boot/uInitrd" "$BOOT_MNT/uInitrd"
 mkdir -p "$BOOT_MNT/dtb/amlogic"
 cp "${SCRIPT_DIR}"/dtb/amlogic/*.dtb "$BOOT_MNT/dtb/amlogic/"
-cp "$UBOOT_BIN" "$BOOT_MNT/u-boot.ext"
 # 拷贝全部机型的 UBOOT_OVERLOAD (boards.conf 第 7 列), install-emmc 数字选型时用
 for ov in $(awk -F: '!/^#/ {gsub(/[[:space:]]/,""); if ($7 != "" && $7 != "NA") print $7}' "${SCRIPT_DIR}/boards.conf"); do
     cp "${SCRIPT_DIR}/u-boot/${ov}" "$BOOT_MNT/"
@@ -245,12 +244,12 @@ cat > "$BOOT_MNT/uEnv.txt" << EOF
 LINUX=/zImage
 INITRD=/uInitrd
 FDT=/dtb/amlogic/${FDTFILE}
-APPEND=root=UUID=${ROOT_UUID} rootflags=data=writeback rw rootwait rootfstype=ext4 console=ttyAML0,115200 console=tty0 no_console_suspend consoleblank=0 fsck.fix=yes fsck.repair=yes net.ifnames=0 max_loop=128 cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory swapaccount=1 ${EXTRA_APPEND}
+APPEND=root=UUID=${ROOT_UUID} rootflags=data=writeback rw rootwait rootfstype=ext4 console=ttyAML0,115200n8 console=tty0 no_console_suspend consoleblank=0 fsck.fix=yes fsck.repair=yes net.ifnames=0 max_loop=128 cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory swapaccount=1 video=HDMI-A-1:1920x1080@60e plymouth.enable=0 ${EXTRA_APPEND}
 EOF
 echo "--- uEnv.txt ---"; cat "$BOOT_MNT/uEnv.txt"; echo "----------------"
 
 # bootfs 自检 (挂载状态下): 缺任一关键文件直接失败
-for f in zImage uInitrd uEnv.txt u-boot.ext "${UBOOT_OVERLOAD}" aml_autoscript s905_autoscript "dtb/amlogic/${FDTFILE}"; do
+for f in zImage uInitrd uEnv.txt "${UBOOT_OVERLOAD}" aml_autoscript s905_autoscript "dtb/amlogic/${FDTFILE}"; do
     [[ -f "$BOOT_MNT/$f" ]] || die "bootfs 缺少关键文件: $f"
 done
 
@@ -264,13 +263,13 @@ umount "$ROOT_MNT"; umount "$BOOT_MNT"; ROOT_MNT=""; BOOT_MNT=""
 
 step "7/7 写入 bootloader 并压缩"
 # 仅带安卓 bootloader 的机型 (Phicomm-N1) 写 0 扇区: 前 444 字节 + 从扇区 1 开始的正文
-# 其余机型不写 0 扇区 — USB 启动依赖板上原厂 uboot 链载 bootfs 里的 u-boot.ext
+# 其余机型不写 0 扇区 — USB 启动依赖板上原厂 uboot 经 autoscript 按 uEnv.txt 直接引导
 if [[ -n "${BOOTLOADER_SRC}" ]]; then
     dd if="${BOOTLOADER_SRC}" of="$LOOP" conv=fsync bs=1 count=444            status=none
     dd if="${BOOTLOADER_SRC}" of="$LOOP" conv=fsync bs=512 skip=1 seek=1      status=none
     echo "已写入 bootloader: ${BOOTLOADER_IMG} (扇区 1)"
 else
-    echo "本机型不写 0 扇区 bootloader (USB 启动由板上原厂 uboot 链载 u-boot.ext)"
+    echo "本机型不写 0 扇区 bootloader (USB 启动由板上原厂 uboot 直接引导)"
 fi
 sync
 losetup -d "$LOOP"; LOOP=""
