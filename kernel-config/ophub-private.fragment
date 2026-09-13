@@ -1,0 +1,12 @@
+# ophub 私有 WiFi/BT 驱动片段 — 仅 build-kernel-ophub.yml (源码 ophub/linux-6.18.y) 引用
+# 主线源码没有这些 Kconfig 符号, 不要在主线 workflow 里合并本文件
+# 覆盖机型: CM311-1a (S905L3A) / M302A (S905L3B) 等 ophub 私有无线方案
+# N1 是 Broadcom BCM43455 (主线 brcmfmac + EXTRA_FIRMWARE 内嵌固件), 与此无关
+
+CONFIG_SSV6051=y
+CONFIG_WLAN_VENDOR_AIC=y
+CONFIG_AIC8800_SUPPORT=y
+CONFIG_AIC8800_SDIO_WLAN=y
+CONFIG_AIC8800_USB_WLAN=y
+CONFIG_AIC8800_BTUSB_SUPPORT=y
+CONFIG_BT_HCIAIC=y

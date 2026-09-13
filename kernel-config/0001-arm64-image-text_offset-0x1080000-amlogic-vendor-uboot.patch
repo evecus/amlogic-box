@@ -1,0 +1,28 @@
+From: ophub/linux-6.18.y (flippy)
+Subject: [PATCH] arm64: Image text_offset 0x1080000 for Amlogic vendor u-boot
+
+---
+--- a/arch/arm64/kernel/image.h
++++ b/arch/arm64/kernel/image.h
+@@ -60,8 +60,10 @@
+  * regardless of the endianness of the kernel. While constant values could be
+  * endian swapped in head.S, all are done here for consistency.
+  */
++#define TEXT_OFFSET 0x01080000
+ #define HEAD_SYMBOLS						\
+ 	DEFINE_IMAGE_LE64(_kernel_size_le, _end - _text);	\
++	DEFINE_IMAGE_LE64(_kernel_offset_le, TEXT_OFFSET);	\
+ 	DEFINE_IMAGE_LE64(_kernel_flags_le, __HEAD_FLAGS);
+ 
+ #endif /* __ARM64_KERNEL_IMAGE_H */
+--- a/arch/arm64/kernel/head.S
++++ b/arch/arm64/kernel/head.S
+@@ -60,7 +60,7 @@
+ 	 */
+ 	efi_signature_nop			// special NOP to identity as PE/COFF executable
+ 	b	primary_entry			// branch to kernel start, magic
+-	.quad	0				// Image load offset from start of RAM, little-endian
++	le64sym	_kernel_offset_le		// Image load offset from start of RAM, little-endian
+ 	le64sym	_kernel_size_le			// Effective size of kernel image, little-endian
+ 	le64sym	_kernel_flags_le		// Informative flags, little-endian
+ 	.quad	0				// reserved
