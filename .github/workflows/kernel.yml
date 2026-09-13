@@ -1,4 +1,4 @@
-name: Build N1 Kernel
+name: Build Kernel
 
 on:
   workflow_dispatch: # 手动触发
@@ -150,16 +150,16 @@ jobs:
           cp boot-extra/uInitrd-${KVER}    "${DEB}/boot/uInitrd"    2>/dev/null || true
 
           cat > "${DEB}/DEBIAN/control" << EOF
-          Package: linux-image-phicomm-n1
+          Package: linux-image-amlogic
           Version: ${KVER}
           Architecture: arm64
-          Maintainer: 163jm <163jm@users.noreply.github.com>
+          Maintainer: evecus <evecus@users.noreply.github.com>
           Depends:
           Provides: linux-image
           Section: kernel
           Priority: optional
           Description: Amlogic TV boxes kernel ${KVER} (mainline ${KVER%%-*}, all-builtin, wired-first, HDMI enabled)
-          Boards: Phicomm-N1 (S905D)
+          Boards: Phicomm-N1 (S905D), CM311-1a-YST (S905L3A), M302A (S905L3B) and same-family boxes
           EOF
 
           cat > "${DEB}/DEBIAN/postinst" << EOF
