@@ -1,13 +1,12 @@
 # Amlogic 盒子内核片段 — 基于 arm64 defconfig 叠加
-# 用法:
-#   make ARCH=arm64 defconfig
-#   ./scripts/kconfig/merge_config.sh -m .config \
-#     kernel-config/slim-amlogic.fragment \
-#     kernel-config/amlogic.fragment
-#   make ARCH=arm64 olddefconfig
 # 覆盖机型: Phicomm-N1(S905D) / CM311-1a-CH(S905L3A) / M302A(S905L3B) / WXY-OES(A311D)
-# 参考基线: panther-x2.fragment 的通用部分 + meson 平台驱动
-
+CONFIG_SSV6051=y
+CONFIG_WLAN_VENDOR_AIC=y
+CONFIG_AIC8800_SUPPORT=y
+CONFIG_AIC8800_SDIO_WLAN=y
+CONFIG_AIC8800_USB_WLAN=y
+CONFIG_AIC8800_BTUSB_SUPPORT=y
+CONFIG_BT_HCIAIC=y
 # 明确关闭 NBD，避免因全内建被 olddefconfig 强制转成 =y
 CONFIG_BLK_DEV_NBD=n
 # --- SoC 基础 (GXL/G12A/G12B 通吃) ---
