@@ -1,0 +1,188 @@
+name: Build N1 Kernel
+
+on:
+  workflow_dispatch: # 手动触发
+    inputs:
+      kernel_sign:
+        description: '内核版本后缀(可留空)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+env:
+  # 通用包内含的 dtb: 4 块自适配板 + 主线自带的 Phicomm-N1
+  AMLOGIC_DTBS: >-
+    meson-g12a-s905l3a-cm311.dtb
+    meson-g12b-a311d-oes-a.dtb
+    meson-g12b-a311d-oes-b.dtb
+    meson-gxl-s905l3b-m302a.dtb
+    meson-gxl-s905d-phicomm-n1.dtb
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm # 免费 arm64 原生 runner,比 x86 交叉编译快
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download stable kernel source (7.1.13, 与 panther-x2 成功构建源一致)
+        run: |
+          KVER=7.2.5
+          wget -q "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-${KVER}.tar.xz"
+          tar -xf "linux-${KVER}.tar.xz"
+          mv "linux-${KVER}" linux
+
+      - name: Apply Amlogic vendor u-boot text_offset patch
+        working-directory: linux
+        run: |
+          # ophub/flippy 补丁: Image 头 text_offset=0x1080000
+          # N1 vendor u-boot 按此字段放置内核, vanilla 的 0 会导致秒崩→WDT 复位循环
+          patch -p1 --batch < ../kernel-config/0001-arm64-image-text_offset-0x1080000-amlogic-vendor-uboot.patch
+          # 打完补丁必须重跑, 否则 Image 头不会带上新字段
+          grep -n "TEXT_OFFSET 0x01080000" arch/arm64/kernel/image.h
+          grep -n "le64sym.*_kernel_offset_le" arch/arm64/kernel/head.S
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libssl-dev libelf-dev \
+            dwarves kmod cpio zstd lz4 udev initramfs-tools u-boot-tools rsync
+
+      - name: Configure kernel (defconfig + slim-amlogic + amlogic fragments)
+        working-directory: linux
+        run: |
+          make ARCH=arm64 defconfig
+          ./scripts/kconfig/merge_config.sh -m .config \
+            ../kernel-config/slim-amlogic.fragment \
+            ../kernel-config/amlogic.fragment
+          make ARCH=arm64 olddefconfig
+
+      - name: Apply kernel sign (写入 CONFIG_LOCALVERSION,影响 uname -r)
+        working-directory: linux
+        run: |
+          SIGN="${{ github.event.inputs.kernel_sign }}"
+          # 无论是否有后缀，都禁用 LOCALVERSION_AUTO，防止 git 状态附加 "+"
+          ./scripts/config --disable CONFIG_LOCALVERSION_AUTO
+          if [ -n "$SIGN" ]; then
+            ./scripts/config --set-str CONFIG_LOCALVERSION "-${SIGN}"
+          else
+            ./scripts/config --set-str CONFIG_LOCALVERSION ""
+          fi
+          make ARCH=arm64 olddefconfig
+          echo "kernelrelease = $(make ARCH=arm64 kernelrelease LOCALVERSION=)"
+
+      - name: Embed WiFi/BT firmware into kernel (仓库有 kernel-firmware/brcm 才启用)
+        working-directory: linux
+        run: |
+          # 全内建内核在 rootfs 挂载前就 probe WiFi/BT,固件必须嵌进 Image 本体
+          # 第一期有线网先行,无 kernel-firmware 目录则跳过;二期补 wifi 时放入固件即可
+          if [ -d ../kernel-firmware/brcm ] && ls ../kernel-firmware/brcm/* >/dev/null 2>&1; then
+            FWLIST=$(cd ../kernel-firmware/brcm && ls | sed 's|^|brcm/|' | tr '\n' ' ')
+            ./scripts/config --set-str CONFIG_EXTRA_FIRMWARE "$FWLIST"
+            ./scripts/config --set-str CONFIG_EXTRA_FIRMWARE_DIR "$(cd .. && pwd)/kernel-firmware"
+            make ARCH=arm64 olddefconfig
+            echo "已嵌入固件: $FWLIST"
+          else
+            echo "!! kernel-firmware/brcm 不存在或为空,跳过固件内嵌 (第一期: 有线网先行)"
+          fi
+
+      - name: Build Image
+        working-directory: linux
+        run: |
+          make ARCH=arm64 LOCALVERSION= -j$(nproc) Image
+
+      - name: Verify Image text_offset (must be 0x1080000)
+        working-directory: linux
+        run: |
+          # 最终产物强校验: text_offset 错了在 CI 就 fail, 避免刷到板子上才发现循环重启
+          TO=$(python3 -c "import struct;print(hex(struct.unpack('<Q',open('arch/arm64/boot/Image','rb').read(16)[8:16])[0]))")
+          echo "Image text_offset = $TO"
+          [ "$TO" = "0x1080000" ] || { echo "!! text_offset 不是 0x1080000, text_offset 补丁未生效"; exit 1; }
+
+      - name: Generate initrd.img / uInitrd (ophub 式, 复刻 generate_uinitrd)
+        run: |
+          KVER=$(cd linux && make ARCH=arm64 kernelrelease LOCALVERSION=)
+          # 1) 新内核文件进系统 /boot (ophub: copy kernel files into armbian system)
+          sudo mkdir -p /boot
+          sudo cp linux/System.map "/boot/System.map-${KVER}"
+          sudo cp linux/.config "/boot/config-${KVER}"
+          sudo cp linux/arch/arm64/boot/Image "/boot/vmlinuz-${KVER}"
+          sudo cp linux/arch/arm64/boot/Image "/boot/Image"
+          # 3) COMPRESS=gzip + 99-uboot 钩子 (mkimage -> uInitrd), 与 ophub common-files 相同
+          sudo sed -i "s|^COMPRESS=.*|COMPRESS=gzip|g" /etc/initramfs-tools/initramfs.conf
+          sudo mkdir -p /etc/initramfs/post-update.d
+          sudo tee /etc/initramfs/post-update.d/99-uboot > /dev/null << 'EOF'
+          #!/bin/sh
+          K_VER="$1"
+          [ -f "/boot/initrd.img-${K_VER}" ] || exit 0
+          mkimage -A arm64 -O linux -T ramdisk -C gzip -n uInitrd \
+            -d "/boot/initrd.img-${K_VER}" "/boot/uInitrd-${K_VER}"
+          EOF
+          sudo chmod +x /etc/initramfs/post-update.d/99-uboot
+          # 4) 删除 runner 上的 flash-kernel 钩子(与 VPS/开发板无关, 必然失败且中断 run-parts)
+          sudo rm -f /etc/initramfs/post-update.d/flash-kernel
+          # 5) 生成 (firmware W: 警告为 initramfs-tools 提示 builtin 驱动缺固件, 无害可忽略)
+          sudo update-initramfs -c -k "${KVER}"
+          ls -l "/boot/initrd.img-${KVER}" "/boot/uInitrd-${KVER}"
+          [[ -f "/boot/uInitrd-${KVER}" ]] || { echo "uInitrd 生成失败"; exit 1; }
+          mkdir -p boot-extra
+          cp "/boot/initrd.img-${KVER}" boot-extra/
+          cp "/boot/uInitrd-${KVER}" boot-extra/
+
+      - name: Package (tar.gz + deb)
+        run: |
+          KVER=$(cd linux && make ARCH=arm64 kernelrelease LOCALVERSION=)
+          PKG="phicomm-n1-kernel-${KVER}"
+
+          # --- tar.gz: ophub 布局, dtb/amlogic/ 与 armbian /boot/dtb 对应 ---
+          mkdir -p "${PKG}"
+          cp linux/arch/arm64/boot/Image "${PKG}/"
+          cp boot-extra/initrd.img-${KVER} "${PKG}/initrd.img" 2>/dev/null || true
+          cp boot-extra/uInitrd-${KVER} "${PKG}/uInitrd" 2>/dev/null || true
+          cp linux/.config "${PKG}/kernel-config"
+          tar -czf "${PKG}.tar.gz" "${PKG}"
+
+          # --- deb 包 (linux-image 布局, dpkg -i 直接安装; 通用包带全部 dtb) ---
+          # 注意: ophub Amlogic 镜像的 /boot 是 vfat, 不支持硬链接, dtb 若作为 dpkg
+          # 拥有的文件放在 /boot 升级时会报 "unable to make backup link"。
+          # 故 dtb 装到 /usr/lib/linux-image-${KVER}/amlogic/ (ext4), 由 postinst cp 到 /boot。
+          DEB="linux-image-amlogic"
+          mkdir -p "${DEB}/DEBIAN" \
+                   "${DEB}/boot" \
+                   "${DEB}/usr/share/doc/${DEB}"
+          cp linux/arch/arm64/boot/Image       "${DEB}/boot/zImage"
+          cp linux/.config                     "${DEB}/boot/kernel-config"
+          cp boot-extra/uInitrd-${KVER}    "${DEB}/boot/uInitrd"    2>/dev/null || true
+
+          cat > "${DEB}/DEBIAN/control" << EOF
+          Package: linux-image-phicomm-n1
+          Version: ${KVER}
+          Architecture: arm64
+          Maintainer: 163jm <163jm@users.noreply.github.com>
+          Depends:
+          Provides: linux-image
+          Section: kernel
+          Priority: optional
+          Description: Amlogic TV boxes kernel ${KVER} (mainline ${KVER%%-*}, all-builtin, wired-first, HDMI enabled)
+          Boards: Phicomm-N1 (S905D)
+          EOF
+
+          cat > "${DEB}/DEBIAN/postinst" << EOF
+          #!/bin/sh
+          exit 0
+          EOF
+          chmod 755 "${DEB}/DEBIAN/postinst"
+
+          dpkg-deb --root-owner-group --build "${DEB}" "${PKG}.deb"
+          echo "PKG_TAR=${PKG}.tar.gz"  >> $GITHUB_ENV
+          echo "PKG_DEB=${PKG}.deb"     >> $GITHUB_ENV
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: kernel-amlogic
+          files: |
+            ${{ env.PKG_TAR }}
+            ${{ env.PKG_DEB }}
