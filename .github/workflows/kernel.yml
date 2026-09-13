@@ -125,7 +125,7 @@ jobs:
       - name: Package (tar.gz + deb)
         run: |
           KVER=$(cd linux && make ARCH=arm64 kernelrelease LOCALVERSION=)
-          PKG="phicomm-n1-kernel-${KVER}"
+          PKG="amlogic-kernel-${KVER}"
 
           # --- tar.gz: ophub 布局, dtb/amlogic/ 与 armbian /boot/dtb 对应 ---
           mkdir -p "${PKG}"
