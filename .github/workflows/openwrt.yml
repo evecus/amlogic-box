@@ -1,0 +1,388 @@
+#==========================================================================
+# 用途：构建 OpenWrt rootfs（通用，不含机型/平台内核）
+#
+# 产出：OpenWrt_{version}_arm64_rootfs.img.xz → 发布到 Release tag: rootfs
+# 后续：rebuild.yml 下载此 img 作为 rootfs_url，套上 amlogic 内核 deb + bootfs
+#
+# OpenWrt 特点（与 debian/alpine workflow 的差异）：
+#   - 包管理器：25.12 起由 opkg 换成 apk（OpenWrt fork），命令类似 Alpine
+#   - init：procd（非 systemd），网络由 netifd 管理（/etc/config/network）
+#   - SSH：dropbear（非 openssh-server），root 密码登录默认允许
+#   - 官方 armsr/armv8 target 提供通用 rootfs.tar.gz（不带平台内核，
+#     与本仓库 "内核来自外部 deb、全 builtin" 的设计正好匹配）
+#
+# 设备端依赖（rootfs-overlay 脚本要求，必须预装）：
+#   - install-emmc : bash tar dosfstools(mkfs.vfat) e2fsprogs(mkfs.ext4)
+#                    parted lsblk dbus(dbus-uuidgen)；hexdump/losetup/fdisk
+#                    由 busybox 提供；其 check_depends 的 apt 兜底在 OpenWrt
+#                    上不可用，缺包会直接失败，故这里一次装齐
+#   - start_service/rc.local : bash perl(balethirq.pl) ethtool(可选)
+#
+# 已知约束：
+#   - rebuild 会删除 /lib/modules/*（内核全 builtin），OpenWrt 自带的
+#     平台 kmod 一并清掉 —— firewall4/nftables 等依赖的内核特性必须在
+#     内核 fragment 里 =y（CONFIG_NF_TABLES 系列），否则防火墙不工作
+#   - OpenWrt 不用 systemd：rebuild 注入的 systemd-* symlink 在 OpenWrt
+#     上是无害死链接，实际开机入口是 /etc/rc.local（procd 原生支持）
+#==========================================================================
+name: RootFS OpenWrt
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_release:
+        description: "OpenWrt 版本（latest-stable=自动取 25.12.x 最新）"
+        required: false
+        default: "latest-stable"
+        type: choice
+        options:
+          - latest-stable
+          - "25.12.5"
+          - "25.12.0"
+
+      root_password:
+        description: "root 密码"
+        required: false
+        default: "1234"
+
+      hostname:
+        description: "主机名"
+        required: false
+        default: "openwrt"
+
+      timezone:
+        description: "时区"
+        required: false
+        default: "Asia/Shanghai"
+        type: choice
+        options:
+          - Asia/Shanghai
+          - Asia/Tokyo
+          - America/New_York
+          - Europe/London
+          - UTC
+
+      extra_packages:
+        description: "额外安装的包（apk，空格分隔）"
+        required: false
+        default: ""
+
+env:
+  TZ: UTC
+  ROOTFS_DIR: /builder/openwrt-rootfs
+  DL_BASE: "https://downloads.openwrt.org/releases"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    if: ${{ github.event.repository.owner.id == github.event.sender.id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 1. 初始化环境 ──────────────────────────────────────────────────
+      - name: Initialize environment
+        id: init
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          docker rmi -f $(docker images -q) 2>/dev/null || true
+          [[ -n "${AGENT_TOOLSDIRECTORY}" ]] && sudo rm -rf "${AGENT_TOOLSDIRECTORY}"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android 2>/dev/null
+          sudo swapoff -a && sudo rm -f /swapfile /mnt/swapfile
+          sudo -E apt-get -y update
+          sudo -E apt-get -y purge \
+            azure-cli ghc* zulu* llvm* firefox google* dotnet* \
+            powershell openjdk* mongodb* moby* 2>/dev/null || true
+          # OpenWrt rootfs 不需要 debootstrap：官方 armsr/armv8 有现成 rootfs.tar.gz
+          sudo -E apt-get -y install \
+            parted e2fsprogs dosfstools \
+            u-boot-tools uuid-runtime openssl pigz \
+            git curl wget xz-utils lz4 zstd pv jq rsync
+          sudo -E apt-get -y autoremove --purge
+          sudo -E apt-get -y clean
+          sudo -E timedatectl set-timezone "${TZ}"
+
+          echo "OPENWRT_RELEASE=${{ inputs.openwrt_release || 'latest-stable' }}" >> "${GITHUB_ENV}"
+          echo "ROOT_PASSWORD=${{ inputs.root_password   || '1234' }}"      >> "${GITHUB_ENV}"
+          echo "HOSTNAME_VAL=${{ inputs.hostname         || 'openwrt' }}"   >> "${GITHUB_ENV}"
+          echo "TZ_VAL=${{ inputs.timezone               || 'Asia/Shanghai' }}" >> "${GITHUB_ENV}"
+          echo "EXTRA_PKGS=${{ inputs.extra_packages     || '' }}"          >> "${GITHUB_ENV}"
+          echo "status=success" >> "${GITHUB_OUTPUT}"
+
+      # ── 2. 合并磁盘空间 ───────────────────────────────────────────────
+      - name: Create build disk
+        if: ${{ steps.init.outputs.status == 'success' && !cancelled() }}
+        run: |
+          mnt_size=$(expr $(df -h /mnt | tail -1 | awk '{print $4}' | sed 's/[[:alpha:]]//g' | sed 's/\..*//') - 1)
+          root_size=$(expr $(df -h / | tail -1 | awk '{print $4}' | sed 's/[[:alpha:]]//g' | sed 's/\..*//') - 4)
+          sudo truncate -s "${mnt_size}G"  /mnt/mnt.img
+          sudo truncate -s "${root_size}G" /root.img
+          sudo losetup /dev/loop6 /mnt/mnt.img
+          sudo losetup /dev/loop7 /root.img
+          sudo pvcreate /dev/loop6 /dev/loop7
+          sudo vgcreate github /dev/loop6 /dev/loop7
+          sudo lvcreate -n runner -l 100%FREE github
+          sudo mkfs.xfs -f -i sparse=0 /dev/github/runner
+          sudo mkdir -p /builder
+          sudo mount /dev/github/runner /builder
+          sudo chown -R runner:runner /builder
+          echo "可用空间: $(df -h /builder | tail -1 | awk '{print $4}')"
+
+      # ── 3. 下载官方 armsr/armv8 rootfs.tar.gz（带 sha256 校验）────────
+      - name: Download OpenWrt rootfs
+        id: download_rootfs
+        if: ${{ steps.init.outputs.status == 'success' && !cancelled() }}
+        run: |
+          set -euo pipefail
+
+          # ── 解析版本号 ────────────────────────────────────────────────
+          if [[ "${OPENWRT_RELEASE}" == "latest-stable" ]]; then
+            # 从 releases 索引取 25.12.x 最新稳定版（排除 rc/snapshot）
+            OPENWRT_VERSION="$(curl -sL --max-time 30 "${DL_BASE}/" \
+              | grep -oE '25\.12\.[0-9]+' | sort -uV | tail -1)"
+            [[ -n "${OPENWRT_VERSION}" ]] || { echo "::error::无法从 ${DL_BASE}/ 解析最新版本"; exit 1; }
+          else
+            OPENWRT_VERSION="${OPENWRT_RELEASE}"
+          fi
+          echo "▶ OpenWrt 版本: ${OPENWRT_VERSION}"
+          echo "OPENWRT_VERSION=${OPENWRT_VERSION}" >> "${GITHUB_ENV}"
+
+          TARGET_BASE="${DL_BASE}/${OPENWRT_VERSION}/targets/armsr/armv8"
+          ROOTFS_FILE="openwrt-${OPENWRT_VERSION}-armsr-armv8-rootfs.tar.gz"
+          ROOTFS_URL="${TARGET_BASE}/${ROOTFS_FILE}"
+
+          # ── sha256 校验（官方 sha256sums 逐字段核对）─────────────────
+          echo "▶ 下载 sha256sums 校验文件..."
+          curl -sL --max-time 60 "${TARGET_BASE}/sha256sums" -o /tmp/openwrt-sha256sums
+          EXPECTED_SHA="$(grep " ${ROOTFS_FILE}\$" /tmp/openwrt-sha256sums | awk '{print $1}')"
+          [[ -n "${EXPECTED_SHA}" ]] || { echo "::error::sha256sums 中未找到 ${ROOTFS_FILE}"; exit 1; }
+
+          echo "▶ 下载: ${ROOTFS_URL}"
+          curl -fSL --retry 3 --max-time 600 -o /tmp/openwrt-rootfs.tar.gz "${ROOTFS_URL}"
+          echo "▶ 大小: $(du -sh /tmp/openwrt-rootfs.tar.gz | awk '{print $1}')"
+
+          ACTUAL_SHA="$(sha256sum /tmp/openwrt-rootfs.tar.gz | awk '{print $1}')"
+          [[ "${ACTUAL_SHA}" == "${EXPECTED_SHA}" ]] || {
+            echo "::error::sha256 不匹配! 期望 ${EXPECTED_SHA}, 实际 ${ACTUAL_SHA}"
+            exit 1
+          }
+          echo "▶ sha256 校验通过: ${ACTUAL_SHA}"
+          echo "status=success" >> "${GITHUB_OUTPUT}"
+
+      # ── 4. 构建 OpenWrt rootfs（解包 + chroot apk 装包 + 配置）────────
+      - name: Build OpenWrt rootfs
+        id: build_rootfs
+        if: ${{ steps.download_rootfs.outputs.status == 'success' && !cancelled() }}
+        run: |
+          set -euo pipefail
+
+          sudo mkdir -p "${ROOTFS_DIR}"
+
+          # ── chroot helper（与 alpine.yml 相同；runner 是 arm64, 可直接 chroot）──
+          mount_chroot() {
+              sudo mount -t proc     proc     "${ROOTFS_DIR}/proc"
+              sudo mount -t sysfs    sysfs    "${ROOTFS_DIR}/sys"
+              sudo mount --bind      /dev     "${ROOTFS_DIR}/dev"
+              sudo mount --bind      /dev/pts "${ROOTFS_DIR}/dev/pts"
+              sudo mount -t tmpfs    tmpfs    "${ROOTFS_DIR}/run"
+          }
+          umount_chroot() {
+              sudo umount -R "${ROOTFS_DIR}/run"      2>/dev/null || true
+              sudo umount -R "${ROOTFS_DIR}/dev/pts"  2>/dev/null || true
+              sudo umount -R "${ROOTFS_DIR}/dev"      2>/dev/null || true
+              sudo umount -R "${ROOTFS_DIR}/sys"      2>/dev/null || true
+              sudo umount -R "${ROOTFS_DIR}/proc"     2>/dev/null || true
+          }
+          trap umount_chroot EXIT
+
+          # ── 解包官方 rootfs ──────────────────────────────────────────
+          echo "▶ 解压到 ${ROOTFS_DIR}..."
+          sudo tar -xzf /tmp/openwrt-rootfs.tar.gz -C "${ROOTFS_DIR}"
+          rm -f /tmp/openwrt-rootfs.tar.gz
+          echo "▶ 解压完成: $(sudo du -sh ${ROOTFS_DIR} | awk '{print $1}')"
+
+          # ── chroot 内可用的 resolv.conf ──────────────────────────────
+          echo "nameserver 223.5.5.5" | sudo tee "${ROOTFS_DIR}/etc/resolv.conf" > /dev/null
+
+          # ── mount chroot ─────────────────────────────────────────────
+          mount_chroot
+
+          # ── 安装设备端依赖 + 基础包（25.12 起 opkg → apk）────────────
+          # 必装清单来源（rootfs-overlay 脚本硬依赖，不能省）：
+          #   install-emmc      : tar dosfstools e2fsprogs parted lsblk dbus
+          #   start_service.sh  : perl ethtool  (bash 必须, 否则 rc.local 注入行跑不了)
+          echo "▶ apk 安装基础依赖..."
+          sudo chroot "${ROOTFS_DIR}" /bin/sh -c "
+            set -e
+            apk update
+            apk add --no-cache \
+              bash perl ethtool \
+              tar dosfstools e2fsprogs parted lsblk dbus \
+              curl wget htop
+            for p in bash perl parted dosfstools e2fsprogs lsblk dbus; do
+              apk -e info \${p} >/dev/null 2>&1 || { echo \"ERROR: 关键包 \${p} 安装失败\"; exit 1; }
+            done
+          "
+
+          # ── 额外包 ───────────────────────────────────────────────────
+          if [[ -n "${EXTRA_PKGS}" ]]; then
+            echo "▶ 安装额外包: ${EXTRA_PKGS}"
+            sudo chroot "${ROOTFS_DIR}" /bin/sh -c "apk add --no-cache ${EXTRA_PKGS}"
+          fi
+
+          # ── 清理 apk 缓存 ────────────────────────────────────────────
+          sudo chroot "${ROOTFS_DIR}" /bin/sh -c "rm -rf /var/cache/apk/* 2>/dev/null || true"
+
+          # ── root 密码（OpenWrt 同样用 /etc/shadow, musl crypt 支持 \$6\$）──
+          ROOT_HASH="$(openssl passwd -6 "${ROOT_PASSWORD}")"
+          sudo sed -i "s|^root:[^:]*|root:${ROOT_HASH}|" "${ROOTFS_DIR}/etc/shadow"
+
+          # ── dropbear：确保 root 密码登录开启 ─────────────────────────
+          sudo tee "${ROOTFS_DIR}/etc/config/dropbear" > /dev/null << 'EOF'
+          config dropbear
+          	option PasswordAuth 'on'
+          	option RootPasswordAuth 'on'
+          	option Port '22'
+          EOF
+          sudo sed -i 's/^[[:space:]]*//' "${ROOTFS_DIR}/etc/config/dropbear"
+
+          # ── 网络：eth0 DHCP（内核 net.ifnames=0, 网卡名固定 eth0）────
+          sudo tee "${ROOTFS_DIR}/etc/config/network" > /dev/null << 'EOF'
+          config interface 'loopback'
+          	option device 'lo'
+          	option proto 'static'
+          	option ipaddr '127.0.0.1'
+          	option netmask '255.0.0.0'
+
+          config interface 'lan'
+          	option device 'eth0'
+          	option proto 'dhcp'
+          EOF
+          sudo sed -i 's/^[[:space:]]*//' "${ROOTFS_DIR}/etc/config/network"
+
+          # ── 时区映射（OpenWrt 用 POSIX TZ 字符串）────────────────────
+          case "${TZ_VAL}" in
+            Asia/Shanghai)    OWRT_TZ="CST-8" ;;
+            Asia/Tokyo)       OWRT_TZ="JST-9" ;;
+            America/New_York) OWRT_TZ="EST5EDT,M3.2.0,M11.1.0" ;;
+            Europe/London)    OWRT_TZ="GMT0BST,M3.5.0/1,M10.5.0" ;;
+            *)                OWRT_TZ="UTC" ;;
+          esac
+          sudo tee "${ROOTFS_DIR}/etc/config/system" > /dev/null << EOF
+          config system
+          	option hostname '${HOSTNAME_VAL}'
+          	option zonename '${TZ_VAL}'
+          	option timezone '${OWRT_TZ}'
+
+          config timeserver 'ntp'
+          	list server 'ntp.aliyun.com'
+          	list server 'time1.cloud.tencent.com'
+          	option enabled '1'
+          	option enable_server '0'
+          EOF
+          sudo sed -i 's/^[[:space:]]*//' "${ROOTFS_DIR}/etc/config/system"
+          echo "${HOSTNAME_VAL}" | sudo tee "${ROOTFS_DIR}/etc/hostname" > /dev/null
+          printf '127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n' \
+            | sudo tee "${ROOTFS_DIR}/etc/hosts" > /dev/null
+
+          # ── /etc/rc.local 保障存在（rebuild 会往里注入 start_service.sh；procd 原生执行它）──
+          if [[ ! -f "${ROOTFS_DIR}/etc/rc.local" ]]; then
+            printf '#!/bin/sh\n# Put your custom commands here\nexit 0\n' \
+              | sudo tee "${ROOTFS_DIR}/etc/rc.local" > /dev/null
+            sudo chmod 755 "${ROOTFS_DIR}/etc/rc.local"
+          fi
+
+          # ── /etc/os-release 补齐 rebuild 需要的字段 ──────────────────
+          # OpenWrt os-release 通常无 VERSION_CODENAME；rebuild 用它做镜像文件名
+          if ! grep -q "^ID=openwrt" "${ROOTFS_DIR}/etc/os-release" 2>/dev/null; then
+            sudo tee -a "${ROOTFS_DIR}/etc/os-release" > /dev/null << EOF
+          ID=openwrt
+          VERSION_ID=${OPENWRT_VERSION}
+          EOF
+            sudo sed -i 's/^[[:space:]]*//' "${ROOTFS_DIR}/etc/os-release"
+          fi
+          if ! grep -q "^VERSION_CODENAME=" "${ROOTFS_DIR}/etc/os-release" 2>/dev/null; then
+            echo "VERSION_CODENAME=${OPENWRT_VERSION}" | sudo tee -a "${ROOTFS_DIR}/etc/os-release" > /dev/null
+          fi
+
+          # ── 卸载 chroot ──────────────────────────────────────────────
+          umount_chroot
+          trap - EXIT
+
+          echo "▶ rootfs 最终大小: $(sudo du -sh ${ROOTFS_DIR} | awk '{print $1}')"
+          echo "status=success" >> "${GITHUB_OUTPUT}"
+
+      # ── 5. 将 rootfs 打包成 rebuild 可直接识别的 "*.img.xz" 镜像 ──────
+      - name: Package rootfs into an image
+        id: wrap_image
+        if: ${{ steps.build_rootfs.outputs.status == 'success' && !cancelled() }}
+        run: |
+          set -euo pipefail
+          WORK="${RUNNER_TEMP}/wrap"
+          sudo rm -rf "${WORK}" && mkdir -p "${WORK}"
+
+          # rootfs 实际占用（MiB）+ 40% 余量 + 512MiB 兜底（设备端 apk 装包要空间）
+          used_mb=$(sudo du -sm "${ROOTFS_DIR}" | awk '{print $1}')
+          img_mb=$(( used_mb * 14 / 10 + 512 ))
+
+          IMG_NAME="OpenWrt_${OPENWRT_VERSION}_arm64_rootfs.img"
+          IMG_PATH="${WORK}/${IMG_NAME}"
+
+          echo "▶ 创建空白镜像: ${img_mb}MiB"
+          truncate -s "${img_mb}M" "${IMG_PATH}"
+
+          # 单分区即可：rebuild 提取 rootfs 时若无 p2 会自动回退用 p1
+          parted -s "${IMG_PATH}" mklabel msdos
+          parted -s "${IMG_PATH}" mkpart primary ext4 1MiB 100%
+
+          LOOPDEV=$(sudo losetup -P -f --show "${IMG_PATH}")
+          sudo mkfs.ext4 -F -L ROOTFS "${LOOPDEV}p1"
+
+          MNT="${WORK}/mnt"
+          mkdir -p "${MNT}"
+          sudo mount "${LOOPDEV}p1" "${MNT}"
+
+          echo "▶ 写入 rootfs 内容..."
+          sudo cp -a "${ROOTFS_DIR}/." "${MNT}/"
+
+          # 复核 os-release 必需字段（rebuild 读取 ID / VERSION_CODENAME）
+          grep -q '^ID=' "${MNT}/etc/os-release"
+          grep -q '^VERSION_CODENAME=' "${MNT}/etc/os-release" || \
+            echo "VERSION_CODENAME=${OPENWRT_VERSION}" | sudo tee -a "${MNT}/etc/os-release" > /dev/null
+
+          sync
+          sudo umount "${MNT}"
+          sudo losetup -d "${LOOPDEV}"
+
+          echo "▶ 压缩镜像 (xz)..."
+          xz -T0 -9 -f "${IMG_PATH}"
+
+          OUT_DIR="${GITHUB_WORKSPACE}/output"
+          mkdir -p "${OUT_DIR}"
+          mv -f "${IMG_PATH}.xz" "${OUT_DIR}/"
+          IMG_XZ_NAME="${IMG_NAME}.xz"
+
+          cd "${OUT_DIR}"
+          sha256sum "${IMG_XZ_NAME}" > "${IMG_XZ_NAME}.sha256"
+
+          echo "IMG_XZ_NAME=${IMG_XZ_NAME}"             >> "${GITHUB_OUTPUT}"
+          echo "IMG_XZ_PATH=${OUT_DIR}/${IMG_XZ_NAME}"  >> "${GITHUB_OUTPUT}"
+          echo "OUT_DIR=${OUT_DIR}"                     >> "${GITHUB_OUTPUT}"
+          echo "status=success" >> "${GITHUB_OUTPUT}"
+
+      # ── 6. 发布 rootfs 到 Release（tag: rootfs, 与 debian/alpine 相同）──
+      - name: Release rootfs
+        uses: ncipollo/release-action@main
+        if: ${{ steps.wrap_image.outputs.status == 'success' && !cancelled() }}
+        with:
+          tag: "rootfs"
+          name: "rootfs"
+          artifacts: |
+            ${{ steps.wrap_image.outputs.IMG_XZ_PATH }}
+            ${{ github.workspace }}/output/${{ steps.wrap_image.outputs.IMG_XZ_NAME }}.sha256
+          allowUpdates: true
+          token: ${{ secrets.GITHUB_TOKEN }}
