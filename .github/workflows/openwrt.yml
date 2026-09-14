@@ -222,6 +222,16 @@ jobs:
           # ── mount chroot ─────────────────────────────────────────────
           mount_chroot
 
+          # ── 切换 apk 源为 http ────────────────────────────────────────
+          # chroot 内 OpenWrt 自带 wget(uclient-fetch/apk3 后端) 走 https 会报
+          # "Failed to send request: Operation not permitted" (musl+ustream-ssl
+          # 在 chroot 环境的兼容问题, 真机上也有人报同款错误);
+          # 官方服务器 http 直连可用 (已验证 200 OK), 构建期临时切 http,
+          # 打包前恢复 https, 设备端不受影响
+          echo "▶ apk 源临时切换为 http (chroot 内 https 不可用)..."
+          sudo sed -i 's|https://downloads.openwrt.org|http://downloads.openwrt.org|g' \
+            "${ROOTFS_DIR}"/etc/apk/repositories.d/*.list
+
           # ── 安装设备端依赖 + 基础包（25.12 起 opkg → apk）────────────
           # 必装清单来源（rootfs-overlay 脚本硬依赖，不能省）：
           #   install-emmc      : tar dosfstools e2fsprogs parted lsblk dbus
@@ -319,6 +329,11 @@ jobs:
           if ! grep -q "^VERSION_CODENAME=" "${ROOTFS_DIR}/etc/os-release" 2>/dev/null; then
             echo "VERSION_CODENAME=${OPENWRT_VERSION}" | sudo tee -a "${ROOTFS_DIR}/etc/os-release" > /dev/null
           fi
+
+          # ── 恢复 apk 源为 https（设备端正常网络环境下使用）────────────
+          echo "▶ 恢复 apk 源为 https..."
+          sudo sed -i 's|http://downloads.openwrt.org|https://downloads.openwrt.org|g' \
+            "${ROOTFS_DIR}"/etc/apk/repositories.d/*.list
 
           # ── 卸载 chroot ──────────────────────────────────────────────
           umount_chroot
