@@ -24,7 +24,7 @@ on:
       root_mb:
         description: "rootfs 分区大小 MiB (boot 固定 256M, 不计入)"
         required: false
-        default: "2560"
+        default: "1024"
       root_password:
         description: "镜像 root 初始密码"
         required: false
