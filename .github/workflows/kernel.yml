@@ -136,16 +136,20 @@ jobs:
           tar -czf "${PKG}.tar.gz" "${PKG}"
 
           # --- deb 包 (linux-image 布局, dpkg -i 直接安装; 通用包带全部 dtb) ---
-          # 注意: ophub Amlogic 镜像的 /boot 是 vfat, 不支持硬链接, dtb 若作为 dpkg
-          # 拥有的文件放在 /boot 升级时会报 "unable to make backup link"。
-          # 故 dtb 装到 /usr/lib/linux-image-${KVER}/amlogic/ (ext4), 由 postinst cp 到 /boot。
+          # 注意: ophub Amlogic 镜像的 /boot 是 vfat, 不支持硬链接, 任何 dpkg 拥有的
+          # /boot 文件在升级(同包名重装)时 dpkg 做 backup link 都会报
+          # "unable to make backup link ... Operation not permitted"。
+          # 故 dtb 与内核文件 (zImage/kernel-config/uInitrd) 全部装到
+          # /usr/lib/linux-image-${KVER}/ (ext4), 由 postinst cp -f 到 /boot。
           DEB="linux-image-amlogic"
+          LIBDIR="usr/lib/linux-image-${KVER}"
           mkdir -p "${DEB}/DEBIAN" \
-                   "${DEB}/boot" \
+                   "${DEB}/${LIBDIR}" \
                    "${DEB}/usr/share/doc/${DEB}"
-          cp linux/arch/arm64/boot/Image       "${DEB}/boot/zImage"
-          cp linux/.config                     "${DEB}/boot/kernel-config"
-          cp boot-extra/uInitrd-${KVER}    "${DEB}/boot/uInitrd"    2>/dev/null || true
+          cp linux/arch/arm64/boot/Image       "${DEB}/${LIBDIR}/zImage"
+          cp linux/.config                     "${DEB}/${LIBDIR}/kernel-config"
+          cp boot-extra/uInitrd-${KVER}    "${DEB}/${LIBDIR}/uInitrd"    2>/dev/null || true
+          [[ -f "${DEB}/${LIBDIR}/uInitrd" ]] || { echo "!! deb 缺少 uInitrd"; exit 1; }
 
           cat > "${DEB}/DEBIAN/control" << EOF
           Package: linux-image-amlogic
@@ -162,6 +166,16 @@ jobs:
 
           cat > "${DEB}/DEBIAN/postinst" << EOF
           #!/bin/sh
+          set -e
+          # 把内核文件铺到 /boot (vfat 不支持硬链接, 不能作为 dpkg 拥有的文件, 见上)
+          # uEnv.txt 引用固定文件名 zImage/uInitrd, 首装/升级均直接覆盖
+          LIBDIR="/usr/lib/linux-image-${KVER}"
+          if [ -f "\${LIBDIR}/zImage" ] && [ -f "\${LIBDIR}/uInitrd" ] && [ -d /boot ]; then
+              cp -f "\${LIBDIR}/zImage"        /boot/zImage
+              cp -f "\${LIBDIR}/kernel-config" /boot/kernel-config
+              cp -f "\${LIBDIR}/uInitrd"       /boot/uInitrd
+              sync
+          fi
           exit 0
           EOF
           chmod 755 "${DEB}/DEBIAN/postinst"
