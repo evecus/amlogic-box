@@ -81,13 +81,19 @@ dpkg-deb -x kernel.deb kernelpkg
 # KVER 从 deb control 的 Version 字段读取 (内核 builtin, deb 不带 lib/modules)
 KVER="$(dpkg-deb -f kernel.deb Version)"
 [[ -n "$KVER" ]] || die "无法从 deb control 读取 Version (KVER)"
-# 内核镜像: 优先 boot/zImage (flippy 惯例命名), 兼容 boot/Image 与 boot/vmlinuz-*
+# 内核镜像: 优先 usr/lib/linux-image-*/ (新 deb 布局, vfat 兼容), 兼容旧 boot/ 布局
 KERNEL_SRC=""
-for f in kernelpkg/boot/zImage kernelpkg/boot/Image kernelpkg/boot/vmlinuz-*; do
+for f in kernelpkg/usr/lib/linux-image-*/zImage kernelpkg/boot/zImage \
+         kernelpkg/boot/Image kernelpkg/boot/vmlinuz-*; do
     [[ -f "$f" ]] && { KERNEL_SRC="$f"; break; }
 done
-[[ -n "$KERNEL_SRC" ]] || die "deb 中未找到内核镜像 (boot/zImage|Image|vmlinuz-*)"
-[[ -f "kernelpkg/boot/uInitrd" ]] || die "deb 中未找到 boot/uInitrd (本流程严格使用 deb 自带 uInitrd)"
+[[ -n "$KERNEL_SRC" ]] || die "deb 中未找到内核镜像 (usr/lib/linux-image-*/zImage | boot/zImage|Image|vmlinuz-*)"
+# uInitrd: 同样兼容两种布局
+UINITRD_SRC=""
+for f in kernelpkg/usr/lib/linux-image-*/uInitrd kernelpkg/boot/uInitrd; do
+    [[ -f "$f" ]] && { UINITRD_SRC="$f"; break; }
+done
+[[ -n "$UINITRD_SRC" ]] || die "deb 中未找到 uInitrd (本流程严格使用 deb 自带 uInitrd)"
 echo "KVER = ${KVER}"
 echo "kernel = ${KERNEL_SRC}"
 
@@ -232,7 +238,7 @@ ROOT_UUID="$(lsblk -no UUID "${LOOP}p2" | head -1)"
 #   board.conf — install-emmc 读取的板级配置 (替代交互式机型选择)
 #   zImage uInitrd aml/s905/emmc_autoscript uEnv.txt
 cp "$KERNEL_SRC" "$BOOT_MNT/zImage"
-cp "kernelpkg/boot/uInitrd" "$BOOT_MNT/uInitrd"
+cp "$UINITRD_SRC" "$BOOT_MNT/uInitrd"
 mkdir -p "$BOOT_MNT/dtb/amlogic"
 cp "${SCRIPT_DIR}/dtb/amlogic/${FDTFILE}" "$BOOT_MNT/dtb/amlogic/"
 # 仅拷贝当前机型的 UBOOT_OVERLOAD, 并生成 install-emmc 读取的 board.conf
