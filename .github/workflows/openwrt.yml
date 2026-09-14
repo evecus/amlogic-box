@@ -106,6 +106,16 @@ jobs:
           sudo -E apt-get -y clean
           sudo -E timedatectl set-timezone "${TZ}"
 
+          # 禁用 runner 的 IPv6。
+          # 根因: OpenWrt 的 fetch 后端 uclient-fetch 有 IPv6→IPv4 回退缺陷,
+          # 在 "能解析 AAAA 但无 IPv6 路由" 的环境(GitHub runner 正是)下,
+          # 连接直接报 "Failed to send request: Operation not permitted"
+          # (OpenWrt 官方 commit d990f80 与论坛均有记载)。
+          # 内核侧禁用 IPv6 后, musl 检测到 AF_INET6 不可用即只返回 A 记录,
+          # uclient-fetch 正常走 IPv4。仅影响本 job, 不写入产物。
+          sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 || true
+          sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1 || true
+
           echo "OPENWRT_RELEASE=${{ inputs.openwrt_release || 'latest-stable' }}" >> "${GITHUB_ENV}"
           echo "ROOT_PASSWORD=${{ inputs.root_password   || '1234' }}"      >> "${GITHUB_ENV}"
           echo "HOSTNAME_VAL=${{ inputs.hostname         || 'openwrt' }}"   >> "${GITHUB_ENV}"
