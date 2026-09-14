@@ -229,6 +229,19 @@ jobs:
           # ── chroot 内可用的 resolv.conf ──────────────────────────────
           echo "nameserver 223.5.5.5" | sudo tee "${ROOTFS_DIR}/etc/resolv.conf" > /dev/null
 
+          # ── 把 downloads.openwrt.org 钉到 IPv4 ───────────────────────
+          # 根因: OpenWrt fetch 后端 uclient-fetch 无 IPv6→IPv4 回退, 而
+          # downloads.openwrt.org 是 Fastly 双栈域名 — GitHub runner 能解析出
+          # AAAA 但无 IPv6 路由, 连接即报 "Failed to send request: Operation
+          # not permitted"。sysctl 禁 IPv6 不够 (musl 的 noipv6 检测只看
+          # socket(AF_INET6) 是否创建失败, disable_ipv6 不影响创建)。
+          # 在 rootfs 的 /etc/hosts 钉运行时解析出的 IPv4: musl 命中 hosts 后
+          # 不再查 DNS, 只剩 A 记录, uclient-fetch 必走 IPv4。
+          DLB_IP="$(getent ahostsv4 downloads.openwrt.org | awk '{print $1; exit}')"
+          [[ -n "${DLB_IP}" ]] || { echo "::error::无法在宿主机解析 downloads.openwrt.org (IPv4)"; exit 1; }
+          echo "▶ chroot /etc/hosts 钉定: downloads.openwrt.org → ${DLB_IP}"
+          echo "${DLB_IP} downloads.openwrt.org" | sudo tee -a "${ROOTFS_DIR}/etc/hosts" > /dev/null
+
           # ── mount chroot ─────────────────────────────────────────────
           mount_chroot
 
