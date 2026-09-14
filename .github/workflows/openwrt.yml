@@ -189,7 +189,12 @@ jobs:
           sudo mkdir -p "${ROOTFS_DIR}"
 
           # ── chroot helper（与 alpine.yml 相同；runner 是 arm64, 可直接 chroot）──
+          # 注意: OpenWrt rootfs tarball 不含 /run 等运行时目录（纯 tmpfs 挂载点
+          # 不落盘）, 与 Alpine minirootfs 不同 — 挂载前必须先创建挂载点
           mount_chroot() {
+              sudo mkdir -p "${ROOTFS_DIR}/proc" "${ROOTFS_DIR}/sys" \
+                           "${ROOTFS_DIR}/dev/pts" "${ROOTFS_DIR}/run" "${ROOTFS_DIR}/tmp"
+              sudo chmod 1777 "${ROOTFS_DIR}/tmp" 2>/dev/null || true
               sudo mount -t proc     proc     "${ROOTFS_DIR}/proc"
               sudo mount -t sysfs    sysfs    "${ROOTFS_DIR}/sys"
               sudo mount --bind      /dev     "${ROOTFS_DIR}/dev"
