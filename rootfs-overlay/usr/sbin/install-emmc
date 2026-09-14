@@ -130,10 +130,12 @@ init_var() {
     [[ -d "${DIR_INSTALL}" ]] && rm -rf ${DIR_INSTALL}
     mkdir -p ${DIR_INSTALL} && chmod 777 ${tmp_path}
 
-    # Regenerate new machine-id
-    rm -f /etc/machine-id /var/lib/dbus/machine-id
-    dbus-uuidgen --ensure=/etc/machine-id
-    dbus-uuidgen --ensure
+    # Regenerate new machine-id (dbus-less 发行版如 Alpine 无 dbus-uuidgen, 跳过)
+    if command -v dbus-uuidgen >/dev/null 2>&1; then
+        rm -f /etc/machine-id /var/lib/dbus/machine-id
+        dbus-uuidgen --ensure=/etc/machine-id
+        dbus-uuidgen --ensure
+    fi
 
     # Generate New ROOTFS UUID
     ROOTFS_UUID="$(cat /proc/sys/kernel/random/uuid)"
@@ -422,9 +424,14 @@ copy_rootfs() {
     mkdir -p ${DIR_INSTALL}/{boot/,dev/,media/,mnt/,proc/,run/,sys/,tmp/}
     chmod 1777 ${DIR_INSTALL}/tmp
     # Copy the relevant directory
-    COPY_SRC="etc home opt root selinux srv usr var"
+    # bin/lib/sbin 必须一并拷贝: Alpine 等非 usrmerge 发行版的 busybox/musl
+    # libc/init 都在这三个真实目录里, 漏拷会让 eMMC 上的系统没有 init
+    # (USB 首启正常是因为 rebuild 组装镜像时整盘 cp -a, 只有 install-emmc 走此路径)。
+    # usrmerge 发行版 (Debian/Fedora/Arch) 里它们是指向 usr/* 的符号链接,
+    # tar 原样保留链接, 下面的条件 symlink 创建会自动跳过。
+    COPY_SRC="bin lib sbin etc home opt root selinux srv usr var"
     for src in ${COPY_SRC}; do
-        if [[ -d "${src}" ]]; then
+        if [[ -d "${src}" || -L "${src}" ]]; then
             echo -e "${INFO} Copying [ ${src} ] ..."
             tar -cf - ${src} | (
                 cd ${DIR_INSTALL}
@@ -432,10 +439,10 @@ copy_rootfs() {
             )
         fi
     done
-    # Create relevant symbolic link
-    ln -sf usr/bin ${DIR_INSTALL}/bin
-    ln -sf usr/lib ${DIR_INSTALL}/lib
-    ln -sf usr/sbin ${DIR_INSTALL}/sbin
+    # Create relevant symbolic link (仅 usrmerge 发行版需要; 非 usrmerge 已随 tar 拷入真实目录)
+    [[ -e "${DIR_INSTALL}/bin"  ]] || ln -sf usr/bin  ${DIR_INSTALL}/bin
+    [[ -e "${DIR_INSTALL}/lib"  ]] || ln -sf usr/lib  ${DIR_INSTALL}/lib
+    [[ -e "${DIR_INSTALL}/sbin" ]] || ln -sf usr/sbin ${DIR_INSTALL}/sbin
 
     echo -e "${INFO} Generate the new fstab file."
     rm -f ${DIR_INSTALL}/etc/fstab
