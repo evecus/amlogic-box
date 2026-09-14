@@ -142,8 +142,9 @@ jobs:
           # ── 解析版本号 ────────────────────────────────────────────────
           if [[ "${OPENWRT_RELEASE}" == "latest-stable" ]]; then
             # 从 releases 索引取 25.12.x 最新稳定版（排除 rc/snapshot）
+            # 同样注意 set -e: 管道无匹配会直接退出, || true 保留给下方 -z 守卫
             OPENWRT_VERSION="$(curl -sL --max-time 30 "${DL_BASE}/" \
-              | grep -oE '25\.12\.[0-9]+' | sort -uV | tail -1)"
+              | grep -oE '25\.12\.[0-9]+' | sort -uV | tail -1 || true)"
             [[ -n "${OPENWRT_VERSION}" ]] || { echo "::error::无法从 ${DL_BASE}/ 解析最新版本"; exit 1; }
           else
             OPENWRT_VERSION="${OPENWRT_RELEASE}"
@@ -156,9 +157,14 @@ jobs:
           ROOTFS_URL="${TARGET_BASE}/${ROOTFS_FILE}"
 
           # ── sha256 校验（官方 sha256sums 逐字段核对）─────────────────
+          # 注意: sha256sums 分隔符两种格式都出现过 —
+          #   25.12.0 为 GNU 风格 "<sha>␠␠<file>", 25.12.5 起为 BSD 风格 "<sha>␠*<file>"
+          # 故 grep 只锚定文件名后缀, 不假设分隔符
           echo "▶ 下载 sha256sums 校验文件..."
-          curl -sL --max-time 60 "${TARGET_BASE}/sha256sums" -o /tmp/openwrt-sha256sums
-          EXPECTED_SHA="$(grep " ${ROOTFS_FILE}\$" /tmp/openwrt-sha256sums | awk '{print $1}')"
+          curl -fSL --retry 3 --max-time 60 "${TARGET_BASE}/sha256sums" -o /tmp/openwrt-sha256sums
+          [[ -s /tmp/openwrt-sha256sums ]] || { echo "::error::sha256sums 下载失败"; exit 1; }
+          # set -e 下 grep 无匹配会让赋值语句直接退出, 必须 || true 让下面的 -z 守卫生效
+          EXPECTED_SHA="$(grep "${ROOTFS_FILE}\$" /tmp/openwrt-sha256sums | awk '{print $1}' || true)"
           [[ -n "${EXPECTED_SHA}" ]] || { echo "::error::sha256sums 中未找到 ${ROOTFS_FILE}"; exit 1; }
 
           echo "▶ 下载: ${ROOTFS_URL}"
