@@ -3,10 +3,20 @@ name: Build Kernel
 on:
   workflow_dispatch: # 手动触发
     inputs:
+      version:
+        description: "Release version (e.g. 6.18.50)"
+        required: true
+        default: '7.2.7'
+        type: string
+      number:
+        description: "kernel number"
+        required: true
+        default: '7'
+        type: string
       kernel_sign:
         description: '内核版本后缀(可留空)'
         required: false
-        default: ''
+        default: 'alice'
 
 permissions:
   contents: write
@@ -22,10 +32,10 @@ jobs:
 
       - name: Download stable kernel source
         run: |
-          KVER=7.2.5
-          wget -q "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-${KVER}.tar.xz"
-          tar -xf "linux-${KVER}.tar.xz"
-          mv "linux-${KVER}" linux
+          #7.2.5 6.12.109 6.18.51 6.6.156
+          wget -q "https://cdn.kernel.org/pub/linux/kernel/v${{ github.event.inputs.number }}.x/linux-${{ github.event.inputs.version }}.tar.xz"
+          tar -xf "linux-${{ github.event.inputs.version }}.tar.xz"
+          mv "linux-${{ github.event.inputs.version }}" linux
 
       - name: Apply Amlogic vendor u-boot text_offset patch
         working-directory: linux
