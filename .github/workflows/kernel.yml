@@ -32,7 +32,6 @@ jobs:
 
       - name: Download stable kernel source
         run: |
-          #7.2.5 6.12.109 6.18.51 6.6.156
           wget -q "https://cdn.kernel.org/pub/linux/kernel/v${{ github.event.inputs.number }}.x/linux-${{ github.event.inputs.version }}.tar.xz"
           tar -xf "linux-${{ github.event.inputs.version }}.tar.xz"
           mv "linux-${{ github.event.inputs.version }}" linux
