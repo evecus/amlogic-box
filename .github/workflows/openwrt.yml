@@ -242,7 +242,7 @@ jobs:
               zram-swap \
               luci-base luci-compat \
               luci-app-firewall luci-app-package-manager \
-              luci-app-upnp luci-app-wifihistory
+              luci-app-upnp luci-app-wifihistory luci-i18n-base-zh-cn
 
             apk add --no-cache \
               luci-app-filemanager luci-app-firewall \
