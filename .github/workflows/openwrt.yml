@@ -242,11 +242,18 @@ jobs:
               zram-swap \
               luci-base luci-compat \
               luci-app-firewall luci-app-package-manager \
-              luci-app-upnp luci-app-wifihistory luci-i18n-base-zh-cn
+              luci-app-upnp luci-app-wifihistory 
+
 
             apk add --no-cache \
               luci-app-filemanager luci-app-firewall \
               luci-app-qos luci-app-sqm luci-app-ttyd
+
+            apk add --no-cache \
+              luci-i18n-firewall-zh-cn luci-i18n-base-zh-cn \
+              luci-i18n-package-manager-zh-cn \
+              luci-i18n-upnp-zh-cn \
+              luci-i18n-wifihistory-zh-cn
 
             # 关键包强校验（缺任何一个设备端脚本/核心功能都会挂）
             for p in bash perl ethtool parted dosfstools e2fsprogs lsblk dbus \
