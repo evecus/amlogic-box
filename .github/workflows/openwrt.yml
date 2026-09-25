@@ -226,7 +226,7 @@ jobs:
             # 网络核心
             apk add --no-cache \
               dnsmasq-full ds-lite resolveip \
-              iw wpad-basic-mbedtls \
+              iw wpad-basic-mbedtls wifi-scripts wireless-regdb iwinfo \
               uclient-fetch wget-ssl libustream-mbedtls
 
             # 系统工具
