@@ -1,46 +1,3 @@
-#==========================================================================
-# 用途：构建 OpenWrt rootfs（通用，不含机型/平台内核）
-#
-# 产出：OpenWrt_{version}_arm64_rootfs.img.xz → 发布到 Release tag: rootfs
-# 后续：rebuild.yml 下载此 img 作为 rootfs_url，套上 amlogic 内核 deb + bootfs
-#
-# OpenWrt 特点（与 debian/alpine workflow 的差异）：
-# - 包管理器：25.12 起由 opkg 换成 apk（OpenWrt fork），命令类似 Alpine
-# - init：procd（非 systemd），网络由 netifd 管理（/etc/config/network）
-# - SSH：dropbear（非 openssh-server），root 密码登录默认允许
-# - 官方 armsr/armv8 target 提供通用 rootfs.tar.gz（不带平台内核，
-#   与本仓库 "内核来自外部 deb、全 builtin" 的设计正好匹配）
-#
-# 设备端依赖（rootfs-overlay 脚本要求，必须预装）：
-# - install-emmc : bash tar dosfstools(mkfs.vfat) e2fsprogs(mkfs.ext4)
-#                  parted lsblk dbus(dbus-uuidgen)；hexdump/losetup/fdisk
-#                  由 busybox 提供；其 check_depends 的 apt 兜底在 OpenWrt
-#                  上不可用，缺包会直接失败，故这里一次装齐
-# - start_service/rc.local : bash perl(balethirq.pl) ethtool(可选)
-#
-# 【改动】本 workflow 已内置默认安装（无需走 extra_packages 输入）：
-# - 存储类  : block-mount blkid fdisk fstools mkf2fs btrfs-progs e2fsprogs
-# - 网络类  : dnsmasq-full ds-lite resolveip iw wpad-basic-mbedtls
-#             uclient-fetch wget-ssl libustream-mbedtls
-# - 工具类  : coremark curl htop nano openssh-sftp-server ca-bundle
-# - perl 全套 perlbase-* + zram-swap
-# - LuCI    : luci-base luci-compat luci-app-firewall
-#             luci-app-package-manager luci-app-upnp luci-app-wifihistory
-# 注意：以上包会连带拉入 kmod-*（btrfs/zram/ip6tnl/conntrack-netlink 等），
-#       对应内核功能必须在 amlogic 内核 fragment 里 =y，否则设备端失效：
-#       CONFIG_BTRFS_FS=y  CONFIG_ZRAM=y  CONFIG_IPV6_TUNNEL=y
-#       CONFIG_NF_CONNTRACK_NETLINK=y  CONFIG_VFAT_FS=y
-#       CONFIG_TCP_CONG_BBR=y  CONFIG_NF_TABLES 系列
-#
-# 已知约束：
-# - rebuild 会删除 /lib/modules/*（内核全 builtin），OpenWrt 自带的
-#   平台 kmod 一并清掉 —— firewall4/nftables 等依赖的内核特性必须在
-#   内核 fragment 里 =y（CONFIG_NF_TABLES 系列），否则防火墙不工作
-# - 【改动】打包前主动清空 /lib/modules/*（rebuild 反正会删，提前清理
-#   让发布的 rootfs.img.xz 更小）
-# - OpenWrt 不用 systemd：rebuild 注入的 systemd-* symlink 在 OpenWrt
-#   上是无害死链接，实际开机入口是 /etc/rc.local（procd 原生支持）
-#==========================================================================
 name: RootFS OpenWrt
 
 on:
@@ -468,6 +425,5 @@ jobs:
           name: "rootfs"
           artifacts: |
             ${{ steps.wrap_image.outputs.IMG_XZ_PATH }}
-            ${{ github.workspace }}/output/${{ steps.wrap_image.outputs.IMG_XZ_NAME }}.sha256
           allowUpdates: true
           token: ${{ secrets.GITHUB_TOKEN }}
