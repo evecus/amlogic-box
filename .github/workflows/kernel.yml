@@ -6,12 +6,7 @@ on:
       version:
         description: "Release version (e.g. 6.18.50)"
         required: true
-        default: '7.2.7'
-        type: string
-      number:
-        description: "kernel number"
-        required: true
-        default: '7'
+        default: '7.2.'
         type: string
       kernel_sign:
         description: '内核版本后缀(可留空)'
@@ -32,7 +27,9 @@ jobs:
 
       - name: Download stable kernel source
         run: |
-          wget -q "https://cdn.kernel.org/pub/linux/kernel/v${{ github.event.inputs.number }}.x/linux-${{ github.event.inputs.version }}.tar.xz"
+          V="${{ github.event.inputs.version }}"
+          MAJOR="${V%%.*}"
+          wget -q "https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/linux-${V}.tar.xz"
           tar -xf "linux-${{ github.event.inputs.version }}.tar.xz"
           mv "linux-${{ github.event.inputs.version }}" linux
 
