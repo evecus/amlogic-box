@@ -7,11 +7,12 @@ on:
       debian_release:
         description: "Debian 版本"
         required: false
-        default: "bookworm"
+        default: "forky"
         type: choice
         options:
           - bookworm
           - trixie
+          - forky
 
 
       armbian_fstype:
@@ -132,21 +133,28 @@ jobs:
           printf '\nTypes: deb\nURIs: https://security.debian.org/debian-security\nSuites: %s-security\nComponents: main contrib non-free\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n' \
             "${DEBIAN_RELEASE}" \
             | sudo tee -a "${ROOTFS_DIR}/etc/apt/sources.list.d/debian.sources" > /dev/null
+          # ── 挂载虚拟文件系统（forky 包 postinst 需要 /proc）────────────
+          sudo mount -t proc  proc  "${ROOTFS_DIR}/proc"
+          sudo mount -t sysfs sysfs "${ROOTFS_DIR}/sys"
+          sudo mount --bind /dev     "${ROOTFS_DIR}/dev"
+          sudo mount --bind /dev/pts "${ROOTFS_DIR}/dev/pts"
           # ── 安装基础包 ────────────────────────────────────────────────
           echo "▶ 安装基础软件包..."
           sudo chroot "${ROOTFS_DIR}" /bin/bash -c "
             set -e
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -qq
-            # trixie 起 ntpdate 由 ntpsec-ntpdate 替代
-            NTPDATE_PKG=ntpdate
-            apt-cache policy ntpdate 2>/dev/null | grep -q 'Candidate: (none)' && NTPDATE_PKG=ntpsec-ntpdate || true
+            # bookworm 用 ntpdate；trixie/forky 起已移除，改用 ntpsec-ntpdate
+            case "${DEBIAN_RELEASE}" in
+              bookworm) NTPDATE_PKG=ntpdate ;;
+              *)        NTPDATE_PKG=ntpsec-ntpdate ;;
+            esac
             apt-get install -y \
               openssh-server sudo curl wget ca-certificates \
               locales tzdata binutils \
               iproute2 network-manager \
               net-tools iputils-ping dnsutils \
-              wireless-tools chrony bc \
+              wireless-tools chrony bc network-manager-tui \
               bash-completion htop nano nftables \
               u-boot-tools initramfs-tools parted \
               btrfs-progs e2fsprogs dosfstools \
@@ -240,6 +248,11 @@ jobs:
           printf 'LABEL=BOOT\t/boot\tvfat\tdefaults\t0 2\n' \
             | sudo tee -a "${ROOTFS_DIR}/etc/fstab" > /dev/null
           sudo mkdir -p "${ROOTFS_DIR}/usr/lib/modules"
+          # ── 卸载虚拟文件系统 ─────────────────────────────────────────
+          sudo umount "${ROOTFS_DIR}/dev/pts" 2>/dev/null || true
+          sudo umount "${ROOTFS_DIR}/dev"     2>/dev/null || true
+          sudo umount "${ROOTFS_DIR}/sys"     2>/dev/null || true
+          sudo umount "${ROOTFS_DIR}/proc"    2>/dev/null || true
           echo "▶ rootfs 完成: $(sudo du -sh ${ROOTFS_DIR} | awk '{print $1}')"
           echo "status=success" >> "${GITHUB_OUTPUT}"
       # ── 3B. 打包 rootfs tar.gz（仅自建模式）─────────────────────────
@@ -327,6 +340,7 @@ jobs:
         with:
           tag: rootfs
           name: "rootfs"
+          prerelease: true
           artifacts: |
             ${{ steps.wrap_image.outputs.IMG_XZ_PATH }}
           allowUpdates: true
