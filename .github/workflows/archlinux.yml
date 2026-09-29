@@ -383,9 +383,6 @@ jobs:
             systemctl disable systemd-networkd.service
           "
 
-          sudo cat > "${ROOTFS_DIR}/etc/nftables.conf" <<'EOF'
-          #!/usr/sbin/nft -f
-          EOF
 
           sudo 
           # ── 卸载 chroot 挂载点 ────────────────────────────────────────
