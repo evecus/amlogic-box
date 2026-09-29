@@ -308,6 +308,7 @@ jobs:
           sudo chroot "${ROOTFS_DIR}" systemctl disable NetworkManager-wait-online.service 2>/dev/null || true
           sudo chroot "${ROOTFS_DIR}" systemctl disable e2scrub_reap.service               2>/dev/null || true
           sudo chroot "${ROOTFS_DIR}" systemctl disable systemd-pstore.service             2>/dev/null || true
+          sudo chroot "${ROOTFS_DIR}" systemctl disable systemd-networkd.service           2>/dev/null || true
 
           # ── uInitrd 钩子 ──────────────────────────────────────────────
           sudo mkdir -p "${ROOTFS_DIR}/etc/initramfs/post-update.d"
