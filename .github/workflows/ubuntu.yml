@@ -152,7 +152,7 @@ jobs:
           EOF
             sudo sed -i 's/^[[:space:]]*//' "${ROOTFS_DIR}/etc/apt/sources.list"
           else
-            # noble (24.04)：使用 DEB822 格式
+            # noble (24.04) / resolute：使用 DEB822 格式
             sudo rm -f "${ROOTFS_DIR}/etc/apt/sources.list"
             sudo tee "${ROOTFS_DIR}/etc/apt/sources.list.d/ubuntu.sources" > /dev/null << 'SOURCES_EOF'
           Types: deb
@@ -169,6 +169,7 @@ jobs:
           # ── resolute(26.04) 强制使用 initramfs-tools 替代默认 dracut ──
           if [[ "${IS_RESOLUTE}" == "true" ]]; then
             sudo chroot "${ROOTFS_DIR}" /bin/bash -c "
+              set -e
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq
               apt-get install -y dracut- initramfs-tools --no-install-recommends 2>/dev/null || \
@@ -177,9 +178,12 @@ jobs:
           fi
 
           # ── 安装基础包 ────────────────────────────────────────────────
+          # jammy: wireless-tools + ntpdate
+          # noble/resolute: wireless-tools 已移除 → iw；ntpdate 改名为 ntpsec-ntpdate
           echo "▶ 安装基础软件包..."
           if [[ "${IS_JAMMY}" == "true" ]]; then
             sudo chroot "${ROOTFS_DIR}" /bin/bash -c "
+              set -e
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq
               apt-get install -y \
@@ -195,15 +199,15 @@ jobs:
                 wireless-regdb rsync wpasupplicant perl \
                 --no-install-recommends
 
-              dpkg -l openssh-server network-manager | grep -c '^ii' | grep -q '^2$' || {
-                echo 'ERROR: 关键包安装不完整'
-                exit 1
-              }
               apt-get upgrade -y
               apt-get clean && rm -rf /var/lib/apt/lists/*
             "
           else
+            # noble / resolute（及以后）：用 iw + ntpsec-ntpdate
+            WT_PKG=iw
+            NTP_PKG=ntpsec-ntpdate
             sudo chroot "${ROOTFS_DIR}" /bin/bash -c "
+              set -e
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq
               apt-get install -y \
@@ -211,19 +215,14 @@ jobs:
                 locales tzdata fdisk \
                 iproute2 network-manager netplan.io \
                 net-tools iputils-ping dnsutils \
-                wireless-tools chrony \
+                ${WT_PKG} chrony \
                 bash-completion htop nano nftables bc \
                 u-boot-tools initramfs-tools parted \
                 btrfs-progs e2fsprogs dosfstools \
-                lsof file procps cron ntpdate bsdextrautils \
-                wireless-regdb rsync perl \
+                lsof file procps cron ${NTP_PKG} bsdextrautils \
+                wireless-regdb rsync wpasupplicant perl \
                 --no-install-recommends
-              apt-get install -y wpasupplicant
 
-              dpkg -l openssh-server network-manager | grep -c '^ii' | grep -q '^2$' || {
-                echo 'ERROR: 关键包安装不完整'
-                exit 1
-              }
               apt-get clean && rm -rf /var/lib/apt/lists/*
             "
           fi
@@ -266,7 +265,9 @@ jobs:
           sudo chmod 600 "${ROOTFS_DIR}/etc/netplan/01-nm-all.yaml"
 
           # ── enable 基础系统服务（平台脚本/服务由 rebuild 阶段统一注入）──
-          sudo chroot "${ROOTFS_DIR}" systemctl enable ssh
+          # Ubuntu 多为 ssh.service；个别版本只有 sshd.service
+          sudo chroot "${ROOTFS_DIR}" bash -c \
+            'systemctl enable ssh 2>/dev/null || systemctl enable sshd'
           sudo chroot "${ROOTFS_DIR}" systemctl enable NetworkManager
           sudo chroot "${ROOTFS_DIR}" systemctl enable NetworkManager-dispatcher
           sudo chroot "${ROOTFS_DIR}" systemctl enable chrony
@@ -361,8 +362,7 @@ jobs:
           echo "BUILT_DATE=${BUILT_DATE}" >> "${GITHUB_OUTPUT}"
           echo "status=success"           >> "${GITHUB_OUTPUT}"
 
-      # ── 5. 将 rootfs 打包成 rebuild 脚本可直接识别的 "*.img.xz" 镜像 ──
-      #        产物文件名使用发行版名称 + 版本信息，不再伪装为 Armbian 镜像 ──
+      # ── 5. 打包成 rebuild 可识别的 *.img.xz ──────────────────────────
       - name: Package rootfs into an image
         id: wrap_image
         if: ${{ steps.package_rootfs.outputs.status == 'success' && !cancelled() }}
@@ -371,8 +371,6 @@ jobs:
           WORK="${RUNNER_TEMP}/wrap"
           sudo rm -rf "${WORK}" && mkdir -p "${WORK}"
 
-          # rootfs 实际占用大小（MiB）+ 40% 余量 + 512MiB 兜底，
-          # 保证后续 apt/内核替换等操作有足够空间
           used_mb=$(sudo du -sm "${ROOTFS_DIR}" | awk '{print $1}')
           img_mb=$(( used_mb * 14 / 10 + 512 ))
 
@@ -382,7 +380,6 @@ jobs:
           echo "▶ 创建空白镜像: ${img_mb}MiB"
           truncate -s "${img_mb}M" "${IMG_PATH}"
 
-          # 单分区即可：extract_armbian() 里若无 p2 会自动回退用 p1
           parted -s "${IMG_PATH}" mklabel msdos
           parted -s "${IMG_PATH}" mkpart primary ext4 1MiB 100%
 
@@ -396,7 +393,6 @@ jobs:
           echo "▶ 写入 rootfs 内容..."
           sudo cp -a "${ROOTFS_DIR}/." "${MNT}/"
 
-          # 确认 os-release 含必需字段（rebuild 脚本的 extract_armbian 会读取 ID / VERSION_CODENAME）
           grep -q '^ID=' "${MNT}/etc/os-release"
           grep -q '^VERSION_CODENAME=' "${MNT}/etc/os-release" || \
             echo "VERSION_CODENAME=${UBUNTU_RELEASE}" | sudo tee -a "${MNT}/etc/os-release" > /dev/null
@@ -416,12 +412,12 @@ jobs:
           cd "${OUT_DIR}"
           sha256sum "${IMG_XZ_NAME}" > "${IMG_XZ_NAME}.sha256"
 
-          echo "IMG_XZ_NAME=${IMG_XZ_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "IMG_XZ_NAME=${IMG_XZ_NAME}"           >> "${GITHUB_OUTPUT}"
           echo "IMG_XZ_PATH=${OUT_DIR}/${IMG_XZ_NAME}" >> "${GITHUB_OUTPUT}"
           echo "IMG_XZ_SHA256_PATH=${OUT_DIR}/${IMG_XZ_NAME}.sha256" >> "${GITHUB_OUTPUT}"
           echo "status=success" >> "${GITHUB_OUTPUT}"
 
-      # ── 6. 发布 rootfs 到 Release ────────────────────────────────────
+      # ── 6. 发布到 Release (tag: rootfs) ──────────────────────────────
       - name: Release rootfs
         uses: ncipollo/release-action@main
         if: ${{ steps.package_rootfs.outputs.status == 'success' && !cancelled() }}
