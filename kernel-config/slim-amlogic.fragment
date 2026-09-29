@@ -62,6 +62,8 @@ CONFIG_STAGING=n
 CONFIG_VIRTUALIZATION=n
 CONFIG_XEN=n
 
+CONFIG_IPVS=n
+
 # === PCI(e) 保留: WXY-OES 的 SATA 走 PCIe(AHCI),不能关 ===
 
 # === 杂项省资源 ===
