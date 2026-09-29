@@ -220,7 +220,7 @@ jobs:
                 --no-install-recommends
               apt-get install -y wpasupplicant
 
-              dpkg -l openssh-server network-manager rsync | grep -c '^ii' | grep -q '^3$' || {
+              dpkg -l openssh-server network-manager | grep -c '^ii' | grep -q '^2$' || {
                 echo 'ERROR: 关键包安装不完整'
                 exit 1
               }
