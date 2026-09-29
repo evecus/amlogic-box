@@ -301,7 +301,8 @@ jobs:
               openrc \
               busybox-suid \
               shadow \
-              bluez
+              bluez \
+              nftables
 
             # 验证关键包
             for p in openssh networkmanager rsync perl; do
@@ -356,6 +357,7 @@ jobs:
             # 基础系统服务
             rc-update add sshd default
             rc-update add networkmanager default
+            rc-update add nftables default
             rc-update add chronyd default
             rc-update add networking boot 2>/dev/null || true
 
