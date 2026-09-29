@@ -192,7 +192,7 @@ jobs:
           # ── disable 不需要的服务 ──────────────────────────────────────
           sudo chroot "${ROOTFS_DIR}" systemctl disable NetworkManager-wait-online.service 2>/dev/null || true
           sudo chroot "${ROOTFS_DIR}" systemctl disable e2scrub_reap.service              2>/dev/null || true
-          sudo chroot "${ROOTFS_DIR}" systemctl disable systemd-networkd.service
+          sudo chroot "${ROOTFS_DIR}" systemctl disable systemd-networkd.service          2>/dev/null || true
           sudo chroot "${ROOTFS_DIR}" systemctl disable systemd-pstore.service            2>/dev/null || true
           # ── uInitrd（dracut 版）──────────────────────────────────────
           # Fedora 用 dracut 而非 initramfs-tools/mkinitramfs，钩子机制不同：
