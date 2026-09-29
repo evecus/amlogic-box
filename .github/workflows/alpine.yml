@@ -301,8 +301,7 @@ jobs:
               openrc \
               busybox-suid \
               shadow \
-              bluez \
-              bluez-utils
+              bluez
 
             # 验证关键包
             for p in openssh networkmanager rsync perl; do
