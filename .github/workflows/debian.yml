@@ -7,7 +7,7 @@ on:
       debian_release:
         description: "Debian 版本"
         required: false
-        default: "forky"
+        default: "bookworm"
         type: choice
         options:
           - bookworm
@@ -151,7 +151,7 @@ jobs:
             esac
             apt-get install -y \
               openssh-server sudo curl wget ca-certificates \
-              locales tzdata binutils \
+              locales tzdata binutils bluez \
               iproute2 network-manager \
               net-tools iputils-ping dnsutils \
               wireless-tools chrony bc network-manager-tui \
@@ -221,10 +221,10 @@ jobs:
           sudo chroot "${ROOTFS_DIR}" systemctl enable NetworkManager
           sudo chroot "${ROOTFS_DIR}" systemctl enable NetworkManager-dispatcher
           sudo chroot "${ROOTFS_DIR}" systemctl enable chrony
-          sudo chroot "${ROOTFS_DIR}" systemctl enable nftables         2>/dev/null || true
+          sudo chroot "${ROOTFS_DIR}" systemctl enable nftables
           # ── disable 不需要的服务 ──────────────────────────────────────
           sudo chroot "${ROOTFS_DIR}" systemctl disable networking.service                2>/dev/null || true
-          sudo chroot "${ROOTFS_DIR}" systemctl disable systemd-networkd                  2>/dev/null || true
+          sudo chroot "${ROOTFS_DIR}" systemctl disable systemd-networkd
           sudo chroot "${ROOTFS_DIR}" systemctl disable NetworkManager-wait-online.service 2>/dev/null || true
           sudo chroot "${ROOTFS_DIR}" systemctl disable e2scrub_reap.service              2>/dev/null || true
           sudo chroot "${ROOTFS_DIR}" systemctl disable systemd-pstore.service            2>/dev/null || true

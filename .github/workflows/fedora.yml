@@ -142,7 +142,7 @@ jobs:
             net-tools iputils bind-utils \
             iw wpa_supplicant chrony bc \
             bash-completion htop nano firewalld \
-            uboot-tools dracut parted \
+            uboot-tools dracut parted bluez \
             btrfs-progs e2fsprogs dosfstools \
             lsof file procps-ng cronie util-linux-user \
             rsync
@@ -192,6 +192,7 @@ jobs:
           # ── disable 不需要的服务 ──────────────────────────────────────
           sudo chroot "${ROOTFS_DIR}" systemctl disable NetworkManager-wait-online.service 2>/dev/null || true
           sudo chroot "${ROOTFS_DIR}" systemctl disable e2scrub_reap.service              2>/dev/null || true
+          sudo chroot "${ROOTFS_DIR}" systemctl disable systemd-networkd.service
           sudo chroot "${ROOTFS_DIR}" systemctl disable systemd-pstore.service            2>/dev/null || true
           # ── uInitrd（dracut 版）──────────────────────────────────────
           # Fedora 用 dracut 而非 initramfs-tools/mkinitramfs，钩子机制不同：
@@ -289,6 +290,7 @@ jobs:
         with:
           tag: rootfs
           name: "rootfs"
+          prerelease: true
           artifacts: |
             ${{ steps.wrap_image.outputs.OUT_DIR }}/${{ steps.wrap_image.outputs.IMG_XZ_NAME }}
           allowUpdates: true

@@ -300,7 +300,9 @@ jobs:
               chrony \
               openrc \
               busybox-suid \
-              shadow
+              shadow \
+              bluez \
+              bluez-utils
 
             # 验证关键包
             for p in openssh networkmanager rsync perl; do
@@ -509,6 +511,7 @@ jobs:
         with:
           tag: "rootfs"
           name: "rootfs"
+          prerelease: true
           artifacts: |
             ${{ steps.wrap_image.outputs.IMG_XZ_PATH }}
           allowUpdates: true

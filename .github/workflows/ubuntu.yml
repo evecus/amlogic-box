@@ -187,7 +187,7 @@ jobs:
                 locales tzdata fdisk binutils \
                 iproute2 network-manager netplan.io \
                 net-tools iputils-ping dnsutils \
-                wireless-tools chrony \
+                wireless-tools chrony bluez \
                 bash-completion htop nano nftables bc \
                 u-boot-tools initramfs-tools parted \
                 btrfs-progs e2fsprogs dosfstools \
@@ -270,12 +270,12 @@ jobs:
           sudo chroot "${ROOTFS_DIR}" systemctl enable NetworkManager
           sudo chroot "${ROOTFS_DIR}" systemctl enable NetworkManager-dispatcher
           sudo chroot "${ROOTFS_DIR}" systemctl enable chrony
-          sudo chroot "${ROOTFS_DIR}" systemctl enable nftables 2>/dev/null || true
+          sudo chroot "${ROOTFS_DIR}" systemctl enable nftables
 
           # ── Ubuntu 特有：禁用 snapd / unattended-upgrades ────────────
           sudo chroot "${ROOTFS_DIR}" bash -c "
             systemctl disable snapd.service snapd.socket snapd.seeded.service 2>/dev/null || true
-            systemctl disable systemd-networkd 2>/dev/null || true
+            systemctl disable systemd-networkd
             apt-mark hold snapd 2>/dev/null || true
             systemctl disable unattended-upgrades.service 2>/dev/null || true
             systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
@@ -427,6 +427,7 @@ jobs:
         with:
           tag: "rootfs"
           name: "rootfs"
+          prerelease: true
           artifacts: |
             ${{ steps.wrap_image.outputs.IMG_XZ_PATH }}
           allowUpdates: true
