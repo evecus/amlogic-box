@@ -380,8 +380,13 @@ jobs:
             systemctl enable nftables               2>/dev/null || true
 
             systemctl disable systemd-pstore.service             2>/dev/null || true
-            systemctl disable systemd-networkd.service           2>/dev/null || true
+            systemctl disable systemd-networkd.service
           "
+
+          cat > "${ROOTFS_DIR}/etc/nftables.conf" <<'EOF'
+          #!/usr/sbin/nft -f
+          # Empty ruleset by default.
+          EOF
 
           # ── 卸载 chroot 挂载点 ────────────────────────────────────────
           umount_chroot
