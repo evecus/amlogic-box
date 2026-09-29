@@ -383,10 +383,10 @@ jobs:
             systemctl enable sshd
             systemctl enable NetworkManager
             systemctl enable systemd-timesyncd
-            systemctl enable nftables               2>/dev/null || true
+            systemctl enable nftables
 
             systemctl disable systemd-pstore.service             2>/dev/null || true
-            systemctl disable systemd-networkd.service           2>/dev/null || true
+            systemctl disable systemd-networkd.service
           "
 
           # ── 卸载 chroot 挂载点 ────────────────────────────────────────
