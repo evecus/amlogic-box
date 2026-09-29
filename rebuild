@@ -162,8 +162,34 @@ done
 rm -f "$RS/etc/resolv.conf"; echo "nameserver 223.5.5.5" > "$RS/etc/resolv.conf"
 
 # eMMC 安装/调度脚本 — 来自 rootfs-overlay (install-emmc/ampart/balethirq/sysctl 等, 移植自 ophub)
+# Arch merged-usr: /usr/sbin -> bin (symlink), 不能把目录覆盖到 symlink 上;
+# 检测到 OS_ID=arch 时, 把 overlay 的 usr/sbin 内容落到真实目录 usr/bin
 OVERLAY="${SCRIPT_DIR}/rootfs-overlay"
-cp -a "$OVERLAY/." "$RS/"
+if [[ "${OS_ID}" == "arch" ]]; then
+    echo "Arch merged-usr: overlay usr/sbin -> usr/bin"
+    # 先拷除 usr 以外的顶层项
+    for item in "$OVERLAY"/*; do
+        [[ -e "$item" ]] || continue
+        base="$(basename "$item")"
+        [[ "$base" == "usr" ]] && continue
+        cp -a "$item" "$RS/"
+    done
+    # usr 下: sbin 内容进 usr/bin, 其余正常覆盖
+    mkdir -p "$RS/usr"
+    for item in "$OVERLAY/usr"/*; do
+        [[ -e "$item" ]] || continue
+        base="$(basename "$item")"
+        if [[ "$base" == "sbin" ]]; then
+            mkdir -p "$RS/usr/bin"
+            cp -a "$item"/. "$RS/usr/bin/"
+        else
+            cp -a "$item" "$RS/usr/"
+        fi
+    done
+else
+    cp -a "$OVERLAY/." "$RS/"
+fi
+# chmod: Arch 下文件在 /usr/bin, 但 /usr/sbin 是指向 bin 的 symlink, 路径仍可解析
 chmod 755 "$RS/usr/sbin/install-emmc" \
           "$RS/usr/sbin/balethirq.pl" \
           "$RS/usr/bin/oes_sata_leds.sh" \
