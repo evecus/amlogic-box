@@ -126,26 +126,34 @@ jobs:
           # 不用 arch-chroot：它会 bind rootfs 到自身，导致 pacman cachedir 报错。
           mount_chroot() {
               local root="$1"
-              sudo mkdir -p "${root}"/{proc,sys,dev,dev/pts,run}
-              sudo mount -t proc     proc     "${root}/proc"
-              sudo mount -t sysfs    sysfs    "${root}/sys"
-              sudo mount --bind      /dev     "${root}/dev"
-              sudo mount --bind      /dev/pts "${root}/dev/pts"
-              sudo mount -t tmpfs    tmpfs    "${root}/run"
+              sudo mkdir -p "${root}"/{proc,sys,dev,run}
+              sudo mount -t proc  proc  "${root}/proc"
+              sudo mount -t sysfs sysfs "${root}/sys"
+              # rbind + rslave: 子挂载可被 umount -R 干净拆掉，且不影响宿主
+              sudo mount --rbind /dev "${root}/dev"
+              sudo mount --make-rslave "${root}/dev"
+              sudo mount -t tmpfs tmpfs "${root}/run"
+          }
+          # 递归卸掉 root 下所有挂载（含懒卸载），避免 Device or resource busy
+          force_umount_tree() {
+              local root="$1"
+              # 从最深挂载点开始卸
+              if command -v findmnt >/dev/null 2>&1; then
+                  while read -r tgt; do
+                      [[ -n "$tgt" ]] || continue
+                      sudo umount -l "$tgt" 2>/dev/null || sudo umount -R -l "$tgt" 2>/dev/null || true
+                  done < <(findmnt -R -n -o TARGET --list "$root" 2>/dev/null | sort -r)
+              fi
+              for sub in mnt run dev/pts dev sys proc; do
+                  sudo umount -R -l "${root}/${sub}" 2>/dev/null || true
+              done
           }
           umount_chroot() {
-              local root="$1"
-              sudo umount -R "${root}/run"      2>/dev/null || true
-              sudo umount -R "${root}/dev/pts"  2>/dev/null || true
-              sudo umount -R "${root}/dev"      2>/dev/null || true
-              sudo umount -R "${root}/sys"      2>/dev/null || true
-              sudo umount -R "${root}/proc"     2>/dev/null || true
+              force_umount_tree "$1"
           }
           cleanup_all() {
-              umount_chroot "${ROOTFS_DIR}"
-              # bootstrap 上可能 bind 了 newroot
-              sudo umount -R "${BOOTSTRAP_DIR}/mnt" 2>/dev/null || true
-              umount_chroot "${BOOTSTRAP_DIR}"
+              force_umount_tree "${ROOTFS_DIR}"
+              force_umount_tree "${BOOTSTRAP_DIR}"
           }
           trap cleanup_all EXIT
 
@@ -254,7 +262,6 @@ jobs:
 
           echo "▶ pacstrap → ${ROOTFS_DIR} ..."
           # -K: 在新 root 内初始化 keyring
-          # -G: 不把 bootstrap 的 keyring 拷过去（我们用 -K 自己 init）
           sudo chroot "${BOOTSTRAP_DIR}" /bin/bash -c "
             set -e
             pacstrap -K /mnt ${PACSTRAP_PKGS}
@@ -269,7 +276,7 @@ jobs:
           fi
 
           # 解绑 newroot，后续直接对 ROOTFS_DIR 操作
-          sudo umount -R "${BOOTSTRAP_DIR}/mnt" 2>/dev/null || true
+          sudo umount -R -l "${BOOTSTRAP_DIR}/mnt" 2>/dev/null || true
           umount_chroot "${BOOTSTRAP_DIR}"
 
           echo "▶ pacstrap 后 rootfs: $(sudo du -sh ${ROOTFS_DIR} | awk '{print $1}')"
@@ -418,11 +425,17 @@ jobs:
           sudo cp "${ROOTFS_DIR}/etc/os-release" "${ROOTFS_DIR}/usr/lib/os-release"
 
           umount_chroot "${ROOTFS_DIR}"
+          force_umount_tree "${BOOTSTRAP_DIR}"
           trap - EXIT
 
           # bootstrap 已完成使命，释放空间
           echo "▶ 删除 bootstrap 工具链..."
-          sudo rm -rf "${BOOTSTRAP_DIR}"
+          # 再扫一遍挂载，避免 bind /dev 残留导致 rm 失败
+          force_umount_tree "${BOOTSTRAP_DIR}"
+          sudo rm -rf "${BOOTSTRAP_DIR}" || {
+            echo "::warning::bootstrap 目录未能完全删除（可能仍有残留挂载），忽略继续"
+            sudo rm -rf "${BOOTSTRAP_DIR}" 2>/dev/null || true
+          }
 
           echo "▶ rootfs 最终大小: $(sudo du -sh ${ROOTFS_DIR} | awk '{print $1}')"
           echo "status=success" >> "${GITHUB_OUTPUT}"
