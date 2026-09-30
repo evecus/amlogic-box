@@ -1,7 +1,6 @@
 name: RootFS openSUSE
 
-# zypper 不在 Ubuntu host 上：用官方 aarch64 容器镜像作底座，
-# skopeo 拉取后解层得到 rootfs，再 chroot 内 zypper 装包/精简。
+# skopeo 拉取官方 aarch64 容器镜像 → 解层 → chroot 内 zypper 装包
 
 on:
   workflow_dispatch:
@@ -113,47 +112,47 @@ jobs:
         if: ${{ steps.init.outputs.status == 'success' && !cancelled() }}
         run: |
           set -euo pipefail
+
           sudo mkdir -p "${ROOTFS_DIR}" /tmp/oci-opensuse
+
           echo "▶ skopeo 拉取 ${OCI_IMAGE} ..."
           sudo skopeo copy "docker://${OCI_IMAGE}" "dir:/tmp/oci-opensuse"
+
           echo "▶ 解压 OCI layers → ${ROOTFS_DIR} ..."
           if [[ -f /tmp/oci-opensuse/manifest.json ]]; then
-            python3 - <<'PY'
-import json, os, subprocess
-m = json.load(open("/tmp/oci-opensuse/manifest.json"))
-layers = m.get("layers") or []
-root = os.environ.get("ROOTFS_DIR", "/builder/opensuse-rootfs")
-for L in layers:
-    dig = L.get("digest", "").replace("sha256:", "")
-    path = f"/tmp/oci-opensuse/{dig}"
-    if not os.path.isfile(path):
-        continue
-    for cmd in [
-        ["tar", "-xzf", path, "-C", root],
-        ["tar", "--zstd", "-xf", path, "-C", root],
-        ["tar", "-xJf", path, "-C", root],
-        ["tar", "-xf", path, "-C", root],
-    ]:
-        r = subprocess.run(["sudo"] + cmd, capture_output=True)
-        if r.returncode == 0:
-            break
-PY
+            while IFS= read -r dig; do
+              [[ -n "$dig" ]] || continue
+              dig="${dig#sha256:}"
+              f="/tmp/oci-opensuse/${dig}"
+              [[ -f "$f" ]] || continue
+              echo "  layer ${dig:0:12}..."
+              sudo tar -xzf "$f" -C "${ROOTFS_DIR}" 2>/dev/null || \
+                sudo tar --zstd -xf "$f" -C "${ROOTFS_DIR}" 2>/dev/null || \
+                sudo tar -xJf "$f" -C "${ROOTFS_DIR}" 2>/dev/null || \
+                sudo tar -xf "$f" -C "${ROOTFS_DIR}" 2>/dev/null || true
+            done < <(jq -r '.layers[]?.digest // empty' /tmp/oci-opensuse/manifest.json 2>/dev/null || true)
           fi
           if [[ ! -d "${ROOTFS_DIR}/etc" ]]; then
             for layer in /tmp/oci-opensuse/*; do
               [[ -f "$layer" ]] || continue
-              [[ "$(basename "$layer")" == manifest.json ]] && continue
-              [[ "$(basename "$layer")" == version ]] && continue
+              bn="$(basename "$layer")"
+              [[ "$bn" == "manifest.json" || "$bn" == "version" || "$bn" == oci-layout ]] && continue
               sudo tar -xzf "$layer" -C "${ROOTFS_DIR}" 2>/dev/null || \
                 sudo tar --zstd -xf "$layer" -C "${ROOTFS_DIR}" 2>/dev/null || \
                 sudo tar -xf "$layer" -C "${ROOTFS_DIR}" 2>/dev/null || true
             done
           fi
-          [[ -d "${ROOTFS_DIR}/etc" ]] || { echo "::error::解压 rootfs 失败"; ls -la /tmp/oci-opensuse; exit 1; }
+          [[ -d "${ROOTFS_DIR}/etc" ]] || {
+            echo "::error::解压 rootfs 失败，未找到 /etc"
+            ls -la /tmp/oci-opensuse
+            exit 1
+          }
+          echo "▶ 底座大小: $(sudo du -sh ${ROOTFS_DIR} | awk '{print $1}')"
+
           mount_chroot() {
             local root="$1"
             sudo mkdir -p "${root}"/{proc,sys,dev,run}
-            sudo mount -t proc proc "${root}/proc"
+            sudo mount -t proc  proc  "${root}/proc"
             sudo mount -t sysfs sysfs "${root}/sys"
             sudo mount --rbind /dev "${root}/dev"
             sudo mount --make-rslave "${root}/dev"
@@ -167,32 +166,105 @@ PY
                 sudo umount -l "$tgt" 2>/dev/null || true
               done < <(findmnt -R -n -o TARGET --list "$root" 2>/dev/null | sort -r)
             fi
-            for sub in run dev sys proc; do sudo umount -R -l "${root}/${sub}" 2>/dev/null || true; done
+            for sub in run dev sys proc; do
+              sudo umount -R -l "${root}/${sub}" 2>/dev/null || true
+            done
           }
           trap 'force_umount "${ROOTFS_DIR}"' EXIT
-          sudo tee "${ROOTFS_DIR}/etc/resolv.conf" > /dev/null << 'R'
-nameserver 8.8.8.8
-nameserver 1.1.1.1
-R
+
+          printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' | sudo tee "${ROOTFS_DIR}/etc/resolv.conf" > /dev/null
+
           mount_chroot "${ROOTFS_DIR}"
-          sudo chroot "${ROOTFS_DIR}" /bin/bash -c 'set +e; zypper --non-interactive --gpg-auto-import-keys refresh; zypper --non-interactive install -y --no-recommends openssh-server sudo curl wget ca-certificates NetworkManager chrony bc htop nano parted e2fsprogs dosfstools rsync; zypper --non-interactive rm -y -u kernel-default 2>/dev/null; zypper clean -a; rm -rf /usr/share/doc/* /usr/share/man/* /var/cache/zypp/*'
+
+          echo "▶ zypper 安装基础包..."
+          sudo chroot "${ROOTFS_DIR}" /bin/bash -c '
+            set +e
+            export ZYPP_CURL2=1
+            zypper --non-interactive --gpg-auto-import-keys refresh
+            zypper --non-interactive install -y --no-recommends \
+              openssh-server sudo curl wget ca-certificates \
+              timezone \
+              iproute2 NetworkManager \
+              net-tools iputils \
+              iw wpa_supplicant chrony bc \
+              htop nano \
+              parted e2fsprogs dosfstools \
+              lsof file procps cron rsync
+            zypper --non-interactive rm -y -u kernel-default 2>/dev/null
+            zypper --non-interactive clean -a
+            rm -rf /usr/share/doc/* /usr/share/man/* /usr/share/info/* 2>/dev/null
+            find /usr/share/locale -type f ! -name "en_US*" ! -name "zh_CN*" ! -name "zh_TW*" ! -name "locale.alias" -delete 2>/dev/null
+            find /usr/share/locale -type d -empty -delete 2>/dev/null
+            rm -rf /var/cache/zypp/* /tmp/* /var/tmp/* /root/.cache 2>/dev/null
+            exit 0
+          '
+
           sudo chroot "${ROOTFS_DIR}" ln -sf "/usr/share/zoneinfo/${TZ_VAL}" /etc/localtime 2>/dev/null || true
           echo "${HOSTNAME_VAL}" | sudo tee "${ROOTFS_DIR}/etc/hostname" > /dev/null
+          printf '127.0.0.1\tlocalhost\n127.0.1.1\t%s\n::1\tlocalhost ip6-localhost ip6-loopback\n' \
+            "${HOSTNAME_VAL}" | sudo tee "${ROOTFS_DIR}/etc/hosts" > /dev/null
+
+          sudo mkdir -p -m 0755 "${ROOTFS_DIR}/var/run/sshd"
+          if [[ -f "${ROOTFS_DIR}/etc/ssh/sshd_config" ]]; then
+            sudo sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' "${ROOTFS_DIR}/etc/ssh/sshd_config"
+            sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' "${ROOTFS_DIR}/etc/ssh/sshd_config"
+          fi
+
           ROOT_HASH="$(openssl passwd -6 "${ROOT_PASSWORD}")"
           sudo sed -i "s|^root:[^:]*|root:${ROOT_HASH}|" "${ROOTFS_DIR}/etc/shadow"
-          sudo chroot "${ROOTFS_DIR}" bash -c 'systemctl enable sshd 2>/dev/null || systemctl enable ssh 2>/dev/null || true; systemctl enable NetworkManager 2>/dev/null || true'
-          grep -q "^VERSION_CODENAME=" "${ROOTFS_DIR}/etc/os-release" 2>/dev/null || echo "VERSION_CODENAME=${RELEASE_TAG}" | sudo tee -a "${ROOTFS_DIR}/etc/os-release" > /dev/null
-          printf "LABEL=ROOTFS\t/\text4\tdefaults,noatime\t0 1\nLABEL=BOOT\t/boot\tvfat\tdefaults\t0 2\n" | sudo tee "${ROOTFS_DIR}/etc/fstab" > /dev/null
+
+          SYS_CONF="${ROOTFS_DIR}/etc/systemd/system.conf"
+          if [[ -f "${SYS_CONF}" ]]; then
+            sudo sed -i 's|^#*DefaultTimeoutStartSec.*|DefaultTimeoutStartSec=10s|g' "${SYS_CONF}"
+            sudo sed -i 's|^#*DefaultTimeoutStopSec.*|DefaultTimeoutStopSec=10s|g' "${SYS_CONF}"
+          fi
+
+          sudo chroot "${ROOTFS_DIR}" bash -c '
+            systemctl enable sshd 2>/dev/null || systemctl enable ssh 2>/dev/null || true
+            systemctl enable NetworkManager 2>/dev/null || true
+            systemctl enable chronyd 2>/dev/null || systemctl enable chrony 2>/dev/null || true
+            systemctl disable NetworkManager-wait-online.service 2>/dev/null || true
+            systemctl disable systemd-networkd.service 2>/dev/null || true
+          '
+
+          if ! grep -q '^VERSION_CODENAME=' "${ROOTFS_DIR}/etc/os-release" 2>/dev/null; then
+            echo "VERSION_CODENAME=${RELEASE_TAG}" | sudo tee -a "${ROOTFS_DIR}/etc/os-release" > /dev/null
+          fi
+          grep -q '^ID=' "${ROOTFS_DIR}/etc/os-release"
+
+          printf 'LABEL=ROOTFS\t/\text4\tdefaults,noatime,nodiratime,commit=600,errors=remount-ro\t0 1\n' \
+            | sudo tee "${ROOTFS_DIR}/etc/fstab" > /dev/null
+          printf 'LABEL=BOOT\t/boot\tvfat\tdefaults\t0 2\n' \
+            | sudo tee -a "${ROOTFS_DIR}/etc/fstab" > /dev/null
           sudo mkdir -p "${ROOTFS_DIR}/usr/lib/modules"
-          force_umount "${ROOTFS_DIR}"; trap - EXIT; sudo rm -rf /tmp/oci-opensuse
+
+          force_umount "${ROOTFS_DIR}"
+          trap - EXIT
+          sudo rm -rf /tmp/oci-opensuse
+
+          echo "▶ rootfs 最终大小: $(sudo du -sh ${ROOTFS_DIR} | awk '{print $1}')"
+          echo "status=success" >> "${GITHUB_OUTPUT}"
+
+      - name: Package rootfs
+        id: package_rootfs
+        if: ${{ steps.build_rootfs.outputs.status == 'success' && !cancelled() }}
+        run: |
+          set -euo pipefail
+          OUT_DIR="${GITHUB_WORKSPACE}/output"
+          mkdir -p "${OUT_DIR}"
+          TARBALL="openSUSE_${RELEASE_TAG}_rootfs.tar.gz"
+          sudo tar -czf "${OUT_DIR}/${TARBALL}" -C "${ROOTFS_DIR}" .
+          cd "${OUT_DIR}" && sha256sum "${TARBALL}" > "${TARBALL}.sha256"
+          echo "OUT_DIR=${OUT_DIR}" >> "${GITHUB_OUTPUT}"
           echo "status=success" >> "${GITHUB_OUTPUT}"
 
       - name: Package rootfs into an image
         id: wrap_image
-        if: ${{ steps.build_rootfs.outputs.status == 'success' && !cancelled() }}
+        if: ${{ steps.package_rootfs.outputs.status == 'success' && !cancelled() }}
         run: |
           set -euo pipefail
-          WORK="${RUNNER_TEMP}/wrap"; sudo rm -rf "${WORK}" && mkdir -p "${WORK}"
+          WORK="${RUNNER_TEMP}/wrap"
+          sudo rm -rf "${WORK}" && mkdir -p "${WORK}"
           used_mb=$(sudo du -sm "${ROOTFS_DIR}" | awk '{print $1}')
           img_mb=$(( used_mb * 14 / 10 + 512 ))
           IMG_NAME="openSUSE_${RELEASE_TAG}_arm64_rootfs.img"
@@ -202,20 +274,29 @@ R
           parted -s "${IMG_PATH}" mkpart primary ext4 1MiB 100%
           LOOPDEV=$(sudo losetup -P -f --show "${IMG_PATH}")
           sudo mkfs.ext4 -F -L ROOTFS "${LOOPDEV}p1"
-          MNT="${WORK}/mnt"; mkdir -p "${MNT}"
+          MNT="${WORK}/mnt"
+          mkdir -p "${MNT}"
           sudo mount "${LOOPDEV}p1" "${MNT}"
           sudo cp -a "${ROOTFS_DIR}/." "${MNT}/"
-          grep -q "^VERSION_CODENAME=" "${MNT}/etc/os-release" || echo "VERSION_CODENAME=${RELEASE_TAG}" | sudo tee -a "${MNT}/etc/os-release" > /dev/null
-          sync; sudo umount "${MNT}"; sudo losetup -d "${LOOPDEV}"
+          grep -q '^ID=' "${MNT}/etc/os-release"
+          grep -q '^VERSION_CODENAME=' "${MNT}/etc/os-release" || \
+            echo "VERSION_CODENAME=${RELEASE_TAG}" | sudo tee -a "${MNT}/etc/os-release" > /dev/null
+          sync
+          sudo umount "${MNT}"
+          sudo losetup -d "${LOOPDEV}"
           xz -T0 -9 -f "${IMG_PATH}"
-          OUT_DIR="${GITHUB_WORKSPACE}/output"; mkdir -p "${OUT_DIR}"
+          OUT_DIR="${GITHUB_WORKSPACE}/output"
+          mkdir -p "${OUT_DIR}"
           mv -f "${IMG_PATH}.xz" "${OUT_DIR}/"
-          echo "IMG_XZ_PATH=${OUT_DIR}/${IMG_NAME}.xz" >> "${GITHUB_OUTPUT}"
+          IMG_XZ_NAME="${IMG_NAME}.xz"
+          cd "${OUT_DIR}" && sha256sum "${IMG_XZ_NAME}" > "${IMG_XZ_NAME}.sha256"
+          echo "IMG_XZ_NAME=${IMG_XZ_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "IMG_XZ_PATH=${OUT_DIR}/${IMG_XZ_NAME}" >> "${GITHUB_OUTPUT}"
           echo "status=success" >> "${GITHUB_OUTPUT}"
 
       - name: Release rootfs
         uses: ncipollo/release-action@main
-        if: ${{ steps.wrap_image.outputs.status == 'success' && !cancelled() }}
+        if: ${{ steps.package_rootfs.outputs.status == 'success' && !cancelled() }}
         with:
           tag: rootfs
           name: "rootfs"
