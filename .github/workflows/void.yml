@@ -96,13 +96,14 @@ jobs:
           trap 'force_umount "${ROOTFS_DIR}"' EXIT
           MIRRORS=("https://repo-default.voidlinux.org/live/current" "https://repo-fastly.voidlinux.org/live/current")
           downloaded=0
+          VOID_MIRROR="https://repo-default.voidlinux.org"
           for base in "${MIRRORS[@]}"; do
             HTML=$(curl -fsSL "${base}/" 2>/dev/null || true)
             FILE=$(echo "$HTML" | grep -oE "void-aarch64-ROOTFS-[0-9]+\.tar\.xz" | sort -u | tail -1)
             [[ -n "$FILE" ]] || continue
             if wget -q --tries=3 --timeout=60 -O /tmp/void-rootfs.tar.xz "${base}/${FILE}"; then
               downloaded=1
-              echo "VOID_MIRROR=${base%/live/current}" >> "${GITHUB_ENV}"
+              VOID_MIRROR="${base%/live/current}"
               break
             fi
           done
@@ -111,9 +112,25 @@ jobs:
           rm -f /tmp/void-rootfs.tar.xz
           echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" | sudo tee "${ROOTFS_DIR}/etc/resolv.conf" > /dev/null
           sudo mkdir -p "${ROOTFS_DIR}/etc/xbps.d"
-          echo "repository=${VOID_MIRROR:-https://repo-default.voidlinux.org}/current/aarch64" | sudo tee "${ROOTFS_DIR}/etc/xbps.d/00-repository-main.conf" > /dev/null
+          echo "repository=${VOID_MIRROR}/current/aarch64" | sudo tee "${ROOTFS_DIR}/etc/xbps.d/00-repository-main.conf" > /dev/null
           mount_chroot "${ROOTFS_DIR}"
-          sudo chroot "${ROOTFS_DIR}" /bin/bash -c 'set -e; xbps-install -Suy || xbps-install -Suy; xbps-install -y openssh openssh-server sudo curl wget ca-certificates chrony bc iproute2 NetworkManager net-tools iputils iw wpa_supplicant htop nano parted e2fsprogs dosfstools rsync; xbps-remove -Oy || true'
+          sudo chroot "${ROOTFS_DIR}" /bin/bash -c '
+            set +e
+            # 官方 ROOTFS 里的 xbps 往往偏旧，必须先单独升级，否则 -Suy 直接退出 16
+            xbps-install -yu xbps
+            xbps-install -Suy
+            xbps-install -Suy
+            set -e
+            xbps-install -y \
+              openssh sudo curl wget ca-certificates \
+              chrony bc \
+              iproute2 NetworkManager \
+              net-tools iputils \
+              iw wpa_supplicant \
+              htop nano \
+              parted e2fsprogs dosfstools rsync
+            xbps-remove -Oy || true
+          '
           sudo chroot "${ROOTFS_DIR}" ln -sf "/usr/share/zoneinfo/${TZ_VAL}" /etc/localtime 2>/dev/null || true
           echo "${HOSTNAME_VAL}" | sudo tee "${ROOTFS_DIR}/etc/hostname" > /dev/null
           ROOT_HASH="$(openssl passwd -6 "${ROOT_PASSWORD}")"
