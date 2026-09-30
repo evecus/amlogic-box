@@ -142,7 +142,10 @@ jobs:
             sudo sed -i "s/^#*PermitRootLogin.*/PermitRootLogin yes/" "${ROOTFS_DIR}/etc/ssh/sshd_config"
             sudo sed -i "s/^#*PasswordAuthentication.*/PasswordAuthentication yes/" "${ROOTFS_DIR}/etc/ssh/sshd_config"
           fi
-          sudo chroot "${ROOTFS_DIR}" /bin/bash -c 'mkdir -p /var/service; for s in sshd NetworkManager chronyd; do [[ -d /etc/sv/$s ]] && ln -sf /etc/sv/$s /var/service/$s; done'
+          # 启用 runit 服务：/var/service 在 ROOTFS 中是指向 /run/runit/runsvdir/current 的 symlink，
+          # chroot 内 /run 为空 tmpfs（悬空），mkdir/ln 都会失败；正确做法是链接到 default runsvdir，
+          # 真机启动时 runit 会将 current 指向 default，服务自动拉起
+          sudo chroot "${ROOTFS_DIR}" /bin/bash -c 'mkdir -p /etc/runit/runsvdir/default; for s in sshd NetworkManager chronyd; do [[ -d /etc/sv/$s ]] && ln -sf /etc/sv/$s /etc/runit/runsvdir/default/$s; done'
           grep -q "^VERSION_CODENAME=" "${ROOTFS_DIR}/etc/os-release" 2>/dev/null || echo "VERSION_CODENAME=void" | sudo tee -a "${ROOTFS_DIR}/etc/os-release" > /dev/null
           printf "LABEL=ROOTFS\t/\text4\tdefaults,noatime\t0 1\nLABEL=BOOT\t/boot\tvfat\tdefaults\t0 2\n" | sudo tee "${ROOTFS_DIR}/etc/fstab" > /dev/null
           sudo mkdir -p "${ROOTFS_DIR}/usr/lib/modules"
