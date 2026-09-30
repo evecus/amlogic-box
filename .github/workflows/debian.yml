@@ -145,16 +145,18 @@ jobs:
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -qq
             # bookworm 用 ntpdate；trixie/forky 起已移除，改用 ntpsec-ntpdate
+            # network-manager-tui 仅 forky 仓库提供，bookworm/trixie 安装会报错
             case "${DEBIAN_RELEASE}" in
-              bookworm) NTPDATE_PKG=ntpdate ;;
-              *)        NTPDATE_PKG=ntpsec-ntpdate ;;
+              bookworm) NTPDATE_PKG=ntpdate;        NMTUI_PKG="" ;;
+              trixie)   NTPDATE_PKG=ntpsec-ntpdate; NMTUI_PKG="" ;;
+              *)        NTPDATE_PKG=ntpsec-ntpdate; NMTUI_PKG="network-manager-tui" ;;
             esac
             apt-get install -y \
               openssh-server sudo curl wget ca-certificates \
               locales tzdata binutils bluez \
               iproute2 network-manager \
               net-tools iputils-ping dnsutils \
-              wireless-tools chrony bc network-manager-tui \
+              wireless-tools chrony bc \${NMTUI_PKG} \
               bash-completion htop nano nftables \
               u-boot-tools initramfs-tools parted \
               btrfs-progs e2fsprogs dosfstools \
