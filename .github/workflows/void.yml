@@ -116,8 +116,11 @@ jobs:
           mount_chroot "${ROOTFS_DIR}"
           sudo chroot "${ROOTFS_DIR}" /bin/bash -c '
             set +e
-            # 官方 ROOTFS 里的 xbps 往往偏旧，必须先单独升级，否则 -Suy 直接退出 16
+            export XBPS_ARCH=aarch64
+            # 必须先 -S 刷新索引，再单独升级 xbps；否则本地缓存显示 up to date，-Suy 仍退出 16
+            xbps-install -S
             xbps-install -yu xbps
+            hash -r
             xbps-install -Suy
             xbps-install -Suy
             set -e
