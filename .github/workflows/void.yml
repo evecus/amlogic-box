@@ -132,7 +132,8 @@ jobs:
               iw wpa_supplicant \
               htop nano \
               parted e2fsprogs dosfstools rsync
-            xbps-remove -Oy || true
+            xbps-remove -Oy
+            rm -rf /var/cache/xbps/*
           '
           sudo chroot "${ROOTFS_DIR}" ln -sf "/usr/share/zoneinfo/${TZ_VAL}" /etc/localtime 2>/dev/null || true
           echo "${HOSTNAME_VAL}" | sudo tee "${ROOTFS_DIR}/etc/hostname" > /dev/null
