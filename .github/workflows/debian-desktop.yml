@@ -166,7 +166,7 @@ jobs:
               btrfs-progs e2fsprogs dosfstools \
               lsof file procps cron ${NTPDATE_PKG} bsdextrautils \
               wireless-regdb rsync wpasupplicant \
-              dbus-user-session policykit-1 \
+              dbus-user-session polkitd pkexec \
               xserver-xorg xserver-xorg-input-all xserver-xorg-video-fbdev \
               ${DESKTOP_PKGS} \
               firefox-esr \
