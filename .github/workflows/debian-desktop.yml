@@ -1,0 +1,309 @@
+name: RootFS debian-desktop
+
+# 在现有 Debian 最小 rootfs 基础上加桌面环境。
+# 默认 XFCE + LightDM（盒子上更轻）；可选 LXQt / LXDE。
+# 产物：Debian_{release}_desktop_arm64_rootfs.img.xz
+
+on:
+  workflow_dispatch:
+    inputs:
+      debian_release:
+        description: "Debian 版本"
+        required: false
+        default: "trixie"
+        type: choice
+        options:
+          - bookworm
+          - trixie
+          - forky
+
+      desktop:
+        description: "桌面环境"
+        required: false
+        default: "xfce"
+        type: choice
+        options:
+          - xfce
+          - lxqt
+          - lxde
+
+      root_password:
+        description: "root 密码"
+        required: false
+        default: "1234"
+
+      hostname:
+        description: "主机名"
+        required: false
+        default: "debian"
+
+      timezone:
+        description: "时区"
+        required: false
+        default: "Asia/Shanghai"
+        type: choice
+        options:
+          - Asia/Shanghai
+          - UTC
+
+env:
+  TZ: UTC
+  DEBIAN_MIRROR: "https://deb.debian.org/debian"
+  ROOTFS_DIR: /builder/debian-desktop-rootfs
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    if: ${{ github.event.repository.owner.id == github.event.sender.id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize environment
+        id: init
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          docker rmi -f $(docker images -q) 2>/dev/null || true
+          [[ -n "${AGENT_TOOLSDIRECTORY}" ]] && sudo rm -rf "${AGENT_TOOLSDIRECTORY}"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android 2>/dev/null
+          sudo swapoff -a && sudo rm -f /swapfile /mnt/swapfile
+          sudo -E apt-get -y update
+          sudo -E apt-get -y purge \
+            azure-cli ghc* zulu* llvm* firefox google* dotnet* \
+            powershell openjdk* mongodb* moby* 2>/dev/null || true
+          sudo -E apt-get -y install \
+            debootstrap \
+            parted e2fsprogs dosfstools btrfs-progs \
+            u-boot-tools uuid-runtime openssl pigz \
+            git curl wget xz-utils lz4 zstd pv jq rsync
+          sudo -E apt-get -y autoremove --purge
+          sudo -E apt-get clean
+          sudo -E timedatectl set-timezone "${TZ}"
+
+          echo "DEBIAN_RELEASE=${{ inputs.debian_release || 'trixie' }}" >> "${GITHUB_ENV}"
+          echo "DESKTOP_ENV=${{ inputs.desktop || 'xfce' }}" >> "${GITHUB_ENV}"
+          echo "ROOT_PASSWORD=${{ inputs.root_password || '1234' }}" >> "${GITHUB_ENV}"
+          echo "HOSTNAME_VAL=${{ inputs.hostname || 'debian' }}" >> "${GITHUB_ENV}"
+          echo "TZ_VAL=${{ inputs.timezone || 'Asia/Shanghai' }}" >> "${GITHUB_ENV}"
+          echo "status=success" >> "${GITHUB_OUTPUT}"
+
+      - name: Create build disk
+        if: ${{ steps.init.outputs.status == 'success' && !cancelled() }}
+        run: |
+          mnt_size=$(expr $(df -h /mnt | tail -1 | awk '{print $4}' | sed 's/[[:alpha:]]//g' | sed 's/\..*//') - 1)
+          root_size=$(expr $(df -h / | tail -1 | awk '{print $4}' | sed 's/[[:alpha:]]//g' | sed 's/\..*//') - 4)
+          sudo truncate -s "${mnt_size}G"  /mnt/mnt.img
+          sudo truncate -s "${root_size}G" /root.img
+          sudo losetup /dev/loop6 /mnt/mnt.img
+          sudo losetup /dev/loop7 /root.img
+          sudo pvcreate /dev/loop6 /dev/loop7
+          sudo vgcreate github /dev/loop6 /dev/loop7
+          sudo lvcreate -n runner -l 100%FREE github
+          sudo mkfs.xfs -f -i sparse=0 /dev/github/runner
+          sudo mkdir -p /builder
+          sudo mount /dev/github/runner /builder
+          sudo chown -R runner:runner /builder
+          echo "可用空间: $(df -h /builder | tail -1 | awk '{print $4}')"
+
+      - name: Build Debian desktop rootfs
+        id: build_rootfs
+        if: ${{ steps.init.outputs.status == 'success' && !cancelled() }}
+        run: |
+          set -euo pipefail
+          echo "▶ debootstrap (${DEBIAN_RELEASE}) desktop=${DESKTOP_ENV} ..."
+          sudo mkdir -p "${ROOTFS_DIR}"
+          sudo debootstrap \
+            --arch=arm64 --include=ca-certificates \
+            "${DEBIAN_RELEASE}" "${ROOTFS_DIR}" "${DEBIAN_MIRROR}/"
+
+          sudo truncate -s 0 "${ROOTFS_DIR}/etc/apt/sources.list"
+          printf 'Types: deb\nURIs: %s\nSuites: %s %s-updates\nComponents: main contrib non-free non-free-firmware\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n' \
+            "${DEBIAN_MIRROR}" "${DEBIAN_RELEASE}" "${DEBIAN_RELEASE}" \
+            | sudo tee "${ROOTFS_DIR}/etc/apt/sources.list.d/debian.sources" > /dev/null
+          printf '\nTypes: deb\nURIs: https://security.debian.org/debian-security\nSuites: %s-security\nComponents: main contrib non-free non-free-firmware\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n' \
+            "${DEBIAN_RELEASE}" \
+            | sudo tee -a "${ROOTFS_DIR}/etc/apt/sources.list.d/debian.sources" > /dev/null
+
+          sudo mount -t proc  proc  "${ROOTFS_DIR}/proc"
+          sudo mount -t sysfs sysfs "${ROOTFS_DIR}/sys"
+          sudo mount --bind /dev     "${ROOTFS_DIR}/dev"
+          sudo mount --bind /dev/pts "${ROOTFS_DIR}/dev/pts"
+          cleanup() {
+            sudo umount -l "${ROOTFS_DIR}/dev/pts" 2>/dev/null || true
+            sudo umount -l "${ROOTFS_DIR}/dev"     2>/dev/null || true
+            sudo umount -l "${ROOTFS_DIR}/sys"     2>/dev/null || true
+            sudo umount -l "${ROOTFS_DIR}/proc"    2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          case "${DESKTOP_ENV}" in
+            lxqt) DESKTOP_PKGS="task-lxqt-desktop lightdm" ;;
+            lxde) DESKTOP_PKGS="task-lxde-desktop lightdm" ;;
+            *)    DESKTOP_PKGS="task-xfce-desktop lightdm" ;;
+          esac
+          case "${DEBIAN_RELEASE}" in
+            bookworm) NTPDATE_PKG=ntpdate; WT_PKG=wireless-tools ;;
+            *)        NTPDATE_PKG=ntpsec-ntpdate; WT_PKG=iw ;;
+          esac
+
+          echo "▶ 安装基础包 + 桌面 (${DESKTOP_ENV}) ..."
+          sudo chroot "${ROOTFS_DIR}" /bin/bash -c "
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y \
+              openssh-server sudo curl wget ca-certificates \
+              locales tzdata binutils bluez \
+              iproute2 network-manager network-manager-gnome \
+              net-tools iputils-ping dnsutils \
+              ${WT_PKG} chrony bc network-manager-tui \
+              bash-completion htop nano nftables \
+              u-boot-tools initramfs-tools parted \
+              btrfs-progs e2fsprogs dosfstools \
+              lsof file procps cron ${NTPDATE_PKG} bsdextrautils \
+              wireless-regdb rsync wpasupplicant \
+              dbus-user-session policykit-1 \
+              xserver-xorg xserver-xorg-input-all xserver-xorg-video-fbdev \
+              ${DESKTOP_PKGS} \
+              firefox-esr \
+              fonts-noto-cjk fonts-noto-core fonts-dejavu-core \
+              --no-install-recommends
+            apt-get clean && rm -rf /var/lib/apt/lists/*
+          "
+
+          sudo chroot "${ROOTFS_DIR}" ln -sf "/usr/share/zoneinfo/${TZ_VAL}" /etc/localtime
+          echo "${TZ_VAL}" | sudo tee "${ROOTFS_DIR}/etc/timezone" > /dev/null
+          sudo chroot "${ROOTFS_DIR}" bash -c \
+            "DEBIAN_FRONTEND=noninteractive dpkg-reconfigure -f noninteractive tzdata"
+          sudo chroot "${ROOTFS_DIR}" bash -c "
+            sed -i 's/^# *\(en_US.UTF-8\)/\1/' /etc/locale.gen
+            grep -q '^zh_CN.UTF-8' /etc/locale.gen 2>/dev/null || echo 'zh_CN.UTF-8 UTF-8' >> /etc/locale.gen
+            locale-gen
+            echo 'LANG=en_US.UTF-8' > /etc/default/locale
+          "
+          echo "${HOSTNAME_VAL}" | sudo tee "${ROOTFS_DIR}/etc/hostname" > /dev/null
+          printf '127.0.0.1\tlocalhost\n127.0.1.1\t%s\n::1\tlocalhost ip6-localhost ip6-loopback\n' \
+            "${HOSTNAME_VAL}" | sudo tee "${ROOTFS_DIR}/etc/hosts" > /dev/null
+
+          sudo mkdir -p -m 0755 "${ROOTFS_DIR}/var/run/sshd"
+          if [[ -f "${ROOTFS_DIR}/etc/ssh/sshd_config" ]]; then
+            sudo sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' "${ROOTFS_DIR}/etc/ssh/sshd_config"
+            sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' "${ROOTFS_DIR}/etc/ssh/sshd_config"
+          fi
+
+          ROOT_HASH="$(openssl passwd -6 "${ROOT_PASSWORD}")"
+          sudo sed -i "s|^root:[^:]*|root:${ROOT_HASH}|" "${ROOTFS_DIR}/etc/shadow"
+
+          sudo mkdir -p "${ROOTFS_DIR}/etc/NetworkManager"
+          printf '[main]\nplugins=ifupdown,keyfile\ndhcp=internal\n[ifupdown]\nmanaged=true\n' \
+            | sudo tee "${ROOTFS_DIR}/etc/NetworkManager/NetworkManager.conf" > /dev/null
+          printf 'auto lo\niface lo inet loopback\n' \
+            | sudo tee "${ROOTFS_DIR}/etc/network/interfaces" > /dev/null
+
+          SYS_CONF="${ROOTFS_DIR}/etc/systemd/system.conf"
+          if [[ -f "${SYS_CONF}" ]]; then
+            sudo sed -i 's|^#*DefaultTimeoutStartSec.*|DefaultTimeoutStartSec=10s|g' "${SYS_CONF}"
+            sudo sed -i 's|^#*DefaultTimeoutStopSec.*|DefaultTimeoutStopSec=10s|g' "${SYS_CONF}"
+          fi
+
+          if [[ ! -f "${ROOTFS_DIR}/etc/rc.local" ]]; then
+            printf '#!/bin/sh -e\nexit 0\n' | sudo tee "${ROOTFS_DIR}/etc/rc.local" > /dev/null
+            sudo chmod +x "${ROOTFS_DIR}/etc/rc.local"
+          fi
+
+          sudo chroot "${ROOTFS_DIR}" bash -c '
+            systemctl enable ssh 2>/dev/null || systemctl enable sshd 2>/dev/null || true
+            systemctl enable NetworkManager
+            systemctl enable NetworkManager-dispatcher 2>/dev/null || true
+            systemctl enable chrony 2>/dev/null || true
+            systemctl enable nftables 2>/dev/null || true
+            systemctl enable lightdm 2>/dev/null || true
+            systemctl set-default graphical.target 2>/dev/null || true
+            systemctl disable networking.service 2>/dev/null || true
+            systemctl disable systemd-networkd 2>/dev/null || true
+            systemctl disable NetworkManager-wait-online.service 2>/dev/null || true
+            systemctl disable e2scrub_reap.service 2>/dev/null || true
+            systemctl disable systemd-pstore.service 2>/dev/null || true
+          '
+          sudo chroot "${ROOTFS_DIR}" truncate -s 0 /etc/motd 2>/dev/null || true
+
+          # LightDM 自动登录 root（盒子调试方便；可事后改掉）
+          sudo mkdir -p "${ROOTFS_DIR}/etc/lightdm/lightdm.conf.d"
+          printf '[Seat:*]\nautologin-user=root\nautologin-user-timeout=0\n' \
+            | sudo tee "${ROOTFS_DIR}/etc/lightdm/lightdm.conf.d/50-autologin.conf" > /dev/null
+
+          sudo mkdir -p "${ROOTFS_DIR}/etc/initramfs/post-update.d"
+          echo 'IyEvYmluL2Jhc2ggLWUKdGVtcG5hbWU9Ii9ib290L3VJbml0cmQtJDEiCm1raW1hZ2UgLUEgYXJtNjQgLU8gbGludXggLVQgcmFtZGlzayAtQyBnemlwIC1uIHVJbml0cmQgLWQgIiQyIiAiJHt0ZW1wbmFtZX0iCmxuIC1zZnYgIiQoYmFzZW5hbWUgXCIke3RlbXBuYW1lfVwiKSIgL2Jvb3QvdUluaXRyZCB8fCBtdiAtdiAiJHt0ZW1wbmFtZX0iIC9ib290L3VJbml0cmQKZXhpdCAwCg==' \
+            | base64 -d | sudo tee "${ROOTFS_DIR}/etc/initramfs/post-update.d/99-uboot" > /dev/null
+          sudo chmod +x "${ROOTFS_DIR}/etc/initramfs/post-update.d/99-uboot"
+          sudo mkdir -p "${ROOTFS_DIR}/etc/initramfs-tools"
+          INITRAMFS_CONF="${ROOTFS_DIR}/etc/initramfs-tools/update-initramfs.conf"
+          if [[ -f "${INITRAMFS_CONF}" ]]; then
+            sudo sed -i 's|^update_initramfs=.*|update_initramfs=no|g' "${INITRAMFS_CONF}"
+          else
+            echo 'update_initramfs=no' | sudo tee "${INITRAMFS_CONF}" > /dev/null
+          fi
+
+          printf 'LABEL=ROOTFS\t/\text4\tdefaults,noatime,nodiratime,commit=600,errors=remount-ro\t0 1\n' \
+            | sudo tee "${ROOTFS_DIR}/etc/fstab" > /dev/null
+          printf 'LABEL=BOOT\t/boot\tvfat\tdefaults\t0 2\n' \
+            | sudo tee -a "${ROOTFS_DIR}/etc/fstab" > /dev/null
+          sudo mkdir -p "${ROOTFS_DIR}/usr/lib/modules"
+
+          cleanup
+          trap - EXIT
+          echo "▶ rootfs 完成: $(sudo du -sh ${ROOTFS_DIR} | awk '{print $1}')"
+          echo "status=success" >> "${GITHUB_OUTPUT}"
+
+      - name: Package rootfs into an image
+        id: wrap_image
+        if: ${{ steps.build_rootfs.outputs.status == 'success' && !cancelled() }}
+        run: |
+          set -euo pipefail
+          WORK="${RUNNER_TEMP}/wrap"
+          sudo rm -rf "${WORK}" && mkdir -p "${WORK}"
+          used_mb=$(sudo du -sm "${ROOTFS_DIR}" | awk '{print $1}')
+          img_mb=$(( used_mb * 14 / 10 + 512 ))
+          IMG_NAME="Debian_${DEBIAN_RELEASE}_desktop_arm64_rootfs.img"
+          IMG_PATH="${WORK}/${IMG_NAME}"
+          echo "▶ 创建空白镜像: ${img_mb}MiB"
+          truncate -s "${img_mb}M" "${IMG_PATH}"
+          parted -s "${IMG_PATH}" mklabel msdos
+          parted -s "${IMG_PATH}" mkpart primary ext4 1MiB 100%
+          LOOPDEV=$(sudo losetup -P -f --show "${IMG_PATH}")
+          sudo mkfs.ext4 -F -L ROOTFS "${LOOPDEV}p1"
+          MNT="${WORK}/mnt"
+          mkdir -p "${MNT}"
+          sudo mount "${LOOPDEV}p1" "${MNT}"
+          sudo cp -a "${ROOTFS_DIR}/." "${MNT}/"
+          grep -q '^ID=' "${MNT}/etc/os-release"
+          grep -q '^VERSION_CODENAME=' "${MNT}/etc/os-release" || \
+            echo "VERSION_CODENAME=${DEBIAN_RELEASE}" | sudo tee -a "${MNT}/etc/os-release" > /dev/null
+          sync
+          sudo umount "${MNT}"
+          sudo losetup -d "${LOOPDEV}"
+          xz -T0 -9 -f "${IMG_PATH}"
+          OUT_DIR="${GITHUB_WORKSPACE}/output"
+          mkdir -p "${OUT_DIR}"
+          mv -f "${IMG_PATH}.xz" "${OUT_DIR}/"
+          IMG_XZ_NAME="${IMG_NAME}.xz"
+          cd "${OUT_DIR}" && sha256sum "${IMG_XZ_NAME}" > "${IMG_XZ_NAME}.sha256"
+          echo "IMG_XZ_NAME=${IMG_XZ_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "IMG_XZ_PATH=${OUT_DIR}/${IMG_XZ_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "status=success" >> "${GITHUB_OUTPUT}"
+
+      - name: Release rootfs
+        uses: ncipollo/release-action@main
+        if: ${{ steps.wrap_image.outputs.status == 'success' && !cancelled() }}
+        with:
+          tag: rootfs
+          name: "rootfs"
+          prerelease: true
+          artifacts: |
+            ${{ steps.wrap_image.outputs.IMG_XZ_PATH }}
+          allowUpdates: true
+          token: ${{ secrets.GITHUB_TOKEN }}
