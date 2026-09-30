@@ -160,7 +160,7 @@ jobs:
               locales tzdata binutils bluez \
               iproute2 network-manager network-manager-gnome \
               net-tools iputils-ping dnsutils \
-              ${WT_PKG} chrony bc network-manager-tui \
+              ${WT_PKG} chrony bc \
               bash-completion htop nano nftables \
               u-boot-tools initramfs-tools parted \
               btrfs-progs e2fsprogs dosfstools \
