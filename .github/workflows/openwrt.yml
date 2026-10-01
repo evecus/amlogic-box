@@ -273,7 +273,7 @@ jobs:
             fi
 
             # 设备端脚本硬依赖 + 存储类
-            DEPS='bash perl ethtool tar dosfstools e2fsprogs parted lsblk dbus blkid block-mount fdisk fstools mkf2fs btrfs-progs'
+            DEPS='sudo bash perl ethtool tar dosfstools e2fsprogs parted lsblk dbus blkid block-mount fdisk fstools mkf2fs btrfs-progs'
             # 网络核心
             NET='dnsmasq-full ds-lite resolveip iw wpad-basic-mbedtls wifi-scripts wireless-regdb iwinfo uclient-fetch wget-ssl '\${USTREAM}
             # 系统工具
