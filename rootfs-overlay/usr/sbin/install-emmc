@@ -456,9 +456,11 @@ copy_rootfs() {
     # (USB 首启正常是因为 rebuild 组装镜像时整盘 cp -a, 只有 install-emmc 走此路径)。
     # usrmerge 发行版 (Debian/Fedora/Arch) 里它们是指向 usr/* 的符号链接,
     # tar 原样保留链接, 下面的条件 symlink 创建会自动跳过。
-    COPY_SRC="bin lib sbin etc home opt root selinux srv usr var"
+    # www(luci-static 等) 为 OpenWrt 特有顶层目录 (漏拷会让 eMMC 上 LuCI 全部 404);
+    # lib64(->lib)/init/overlay/rom 为 OpenWrt rootfs 顶层内容, 一并补齐保证与底座一致。
+    COPY_SRC="bin lib lib64 sbin etc home opt root selinux srv usr var www init overlay rom"
     for src in ${COPY_SRC}; do
-        if [[ -d "${src}" || -L "${src}" ]]; then
+        if [[ -e "${src}" ]]; then
             echo -e "${INFO} Copying [ ${src} ] ..."
             tar -cf - ${src} | (
                 cd ${DIR_INSTALL}
