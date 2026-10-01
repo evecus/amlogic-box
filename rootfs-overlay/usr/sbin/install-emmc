@@ -24,7 +24,7 @@
 #======================================== Functions list ========================================
 #
 # error_msg          : Output error message and abort execution
-# check_depends      : Check and install required dependencies
+# check_depends      : Check and install required dependencies (apt-get/apk/opkg auto-detect)
 # init_var           : Initialize all runtime variables and parse options
 # load_board_conf    : Read board config from /boot/board.conf (written at build time)
 # ampart_tool        : Repartition eMMC using ampart tool
@@ -57,13 +57,18 @@ error_msg() {
     exit 1
 }
 
-# Check dependencies
+# Check dependencies (Debian/Armbian: apt-get, Alpine: apk, OpenWrt: opkg)
 check_depends() {
     echo -e "${STEPS} Checking dependencies..."
 
+    # 兼容性软链（先于检测执行）：OpenWrt 的 dosfstools 只提供 mkfs.fat，
+    # 不带 mkfs.vfat。先补链接，避免已具备能力却被误判缺依赖而触发安装。
+    if [[ -z "$(which mkfs.vfat 2>/dev/null)" && -n "$(which mkfs.fat 2>/dev/null)" ]]; then
+        ln -sf "$(which mkfs.fat)" "$(dirname "$(which mkfs.fat)")/mkfs.vfat"
+    fi
+
     is_missing="0"
     necessary_packages=("tar" "hexdump" "mkfs.vfat" "mkfs.ext4" "parted" "losetup" "fdisk" "lsblk")
-    install_packages=("tar" "bsdextrautils" "dosfstools" "e2fsprogs" "parted" "mount" "fdisk" "util-linux")
 
     i="1"
     for package in ${necessary_packages[*]}; do
@@ -73,12 +78,34 @@ check_depends() {
 
     if [[ "${is_missing}" -eq "1" ]]; then
         echo -e "${INFO} Installing necessary dependencies."
-        sudo apt-get update
-        sudo apt-get install -y ${install_packages[*]}
-        [[ "${?}" -eq "0" ]] || error_msg "Failed to install dependencies, aborting!"
+        if command -v apt-get >/dev/null 2>&1; then
+            # Debian / Ubuntu / Armbian
+            sudo apt-get update
+            sudo apt-get install -y tar bsdextrautils dosfstools e2fsprogs parted mount fdisk util-linux
+            [[ "${?}" -eq "0" ]] || error_msg "Failed to install dependencies, aborting!"
+        elif command -v apk >/dev/null 2>&1; then
+            # Alpine（busybox 自带 losetup/getopt/hexdump）
+            apk add tar dosfstools e2fsprogs parted fdisk lsblk
+            [[ "${?}" -eq "0" ]] || error_msg "Failed to install dependencies, aborting!"
+        elif command -v opkg >/dev/null 2>&1; then
+            # OpenWrt (opkg, 24.10 及更早)
+            # busybox 默认不带 losetup/getopt 的 applet 链接, 由 util-linux 分包补齐
+            opkg update
+            opkg install tar dosfstools e2fsprogs parted fdisk lsblk losetup getopt
+            [[ "${?}" -eq "0" ]] || error_msg "Failed to install dependencies, aborting!"
+        else
+            error_msg "Unsupported system: no apt-get/apk/opkg package manager found!"
+        fi
     else
         echo -e "${INFO} Dependency check completed. Proceeding installation..."
     fi
+
+    # 复检：列出仍缺失的命令，便于定位（而不是笼统的 install failed）
+    still_missing=""
+    for package in ${necessary_packages[*]}; do
+        [[ -n "$(which "${package}" 2>/dev/null)" ]] || still_missing="${still_missing} ${package}"
+    done
+    [[ -z "${still_missing}" ]] || error_msg "Missing dependencies:[${still_missing}] Install them manually and retry."
 }
 
 # Initialize all variables
