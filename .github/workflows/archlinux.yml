@@ -288,7 +288,7 @@ jobs:
               net-tools iputils bind \
               wireless_tools wpa_supplicant wireless-regdb \
               bash-completion htop nano nftables bc \
-              uboot-tools parted networkmanager \
+              uboot-tools parted \
               btrfs-progs e2fsprogs dosfstools \
               lsof file procps-ng cronie \
               rsync logrotate perl
@@ -381,12 +381,11 @@ jobs:
           # ── enable 基础系统服务（平台脚本/服务由 rebuild 阶段统一注入）──
           sudo chroot "${ROOTFS_DIR}" /bin/bash -c "
             systemctl enable sshd
-            systemctl enable NetworkManager
             systemctl enable systemd-timesyncd
             systemctl enable nftables
 
             systemctl disable systemd-pstore.service             2>/dev/null || true
-            systemctl disable systemd-networkd.service
+            systemctl enable systemd-networkd.service
           "
 
           # ── 卸载 chroot 挂载点 ────────────────────────────────────────
@@ -457,7 +456,7 @@ jobs:
           OUT_DIR="${GITHUB_WORKSPACE}/output"
           mkdir -p "${OUT_DIR}"
 
-          TARBALL="Arch_${ARCH_RELEASE}_rootfs.tar.gz"
+          TARBALL="Archlinux_${ARCH_RELEASE}_rootfs.tar.gz"
           echo "▶ 打包 → ${TARBALL} ..."
           sudo tar -czf "${OUT_DIR}/${TARBALL}" -C "${ROOTFS_DIR}" .
           echo "▶ 大小: $(du -sh ${OUT_DIR}/${TARBALL} | awk '{print $1}')"
@@ -488,7 +487,7 @@ jobs:
           used_mb=$(sudo du -sm "${ROOTFS_DIR}" | awk '{print $1}')
           img_mb=$(( used_mb * 14 / 10 + 512 ))
 
-          IMG_NAME="Arch_${ARCH_RELEASE}_arm64_rootfs.img"
+          IMG_NAME="Archlinux_${ARCH_RELEASE}_arm64_rootfs.img"
           IMG_PATH="${WORK}/${IMG_NAME}"
 
           echo "▶ 创建空白镜像: ${img_mb}MiB"
