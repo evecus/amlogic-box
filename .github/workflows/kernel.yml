@@ -199,41 +199,42 @@ jobs:
 
       - name: Package (tar.gz + deb)
         run: |
+          set -euo pipefail
           KVER=$(cd linux && make ARCH=arm64 kernelrelease LOCALVERSION=)
           PKG="amlogic-kernel-${KVER}"
 
           # --- tar.gz: ophub 布局 ---
           mkdir -p "${PKG}"
           cp linux/arch/arm64/boot/Image "${PKG}/"
-          cp boot-extra/initrd.img-${KVER} "${PKG}/initrd.img" 2>/dev/null || true
-          cp boot-extra/uInitrd-${KVER} "${PKG}/uInitrd" 2>/dev/null || true
+          cp "boot-extra/initrd.img-${KVER}" "${PKG}/initrd.img" 2>/dev/null || true
+          cp "boot-extra/uInitrd-${KVER}" "${PKG}/uInitrd" 2>/dev/null || true
           cp linux/.config "${PKG}/kernel-config"
           tar -czf "${PKG}.tar.gz" "${PKG}"
 
           # --- deb 包: 文件装到 /usr/lib, postinst cp 到 /boot (vfat 兼容) ---
           DEB="linux-image-amlogic"
           LIBDIR="usr/lib/linux-image-${KVER}"
+          rm -rf "${DEB}"
           mkdir -p "${DEB}/DEBIAN" \
             "${DEB}/${LIBDIR}" \
             "${DEB}/usr/share/doc/${DEB}"
           cp linux/arch/arm64/boot/Image "${DEB}/${LIBDIR}/zImage"
           cp linux/.config "${DEB}/${LIBDIR}/kernel-config"
-          cp boot-extra/uInitrd-${KVER} "${DEB}/${LIBDIR}/uInitrd" 2>/dev/null || true
+          cp "boot-extra/uInitrd-${KVER}" "${DEB}/${LIBDIR}/uInitrd" 2>/dev/null || true
           [[ -f "${DEB}/${LIBDIR}/uInitrd" ]] || { echo "!! deb 缺少 uInitrd"; exit 1; }
 
-          cat > "${DEB}/DEBIAN/control" << EOF
-          Package: linux-image-amlogic
-          Version: ${KVER}
-          Architecture: arm64
-          Maintainer: evecus <evecus@users.noreply.github.com>
-          Depends:
-          Provides: linux-image
-          Section: kernel
-          Priority: optional
-          Description: Amlogic TV boxes kernel ${KVER} (mainline ${KVER%%-*}, all-builtin, wired-first, HDMI enabled)
-
-          Boards: Phicomm-N1 (S905D), CM311-1a-YST (S905L3A), M302A (S905L3B) and same-family boxes
-          EOF
+          # deb control: Description 续行必须以空格开头；空 Depends 字段省略
+          {
+            echo "Package: linux-image-amlogic"
+            echo "Version: ${KVER}"
+            echo "Architecture: arm64"
+            echo "Maintainer: evecus <evecus@users.noreply.github.com>"
+            echo "Provides: linux-image"
+            echo "Section: kernel"
+            echo "Priority: optional"
+            echo "Description: Amlogic TV boxes kernel ${KVER} (mainline, all-builtin, HDMI)"
+            echo " Boards: Phicomm-N1 (S905D), CM311-1a-YST (S905L3A), M302A (S905L3B)"
+          } > "${DEB}/DEBIAN/control"
 
           cat > "${DEB}/DEBIAN/postinst" << EOF
           #!/bin/sh
@@ -247,6 +248,8 @@ jobs:
           fi
           exit 0
           EOF
+          # 去掉 heredoc 因 YAML 缩进带来的前导空格
+          sed -i 's/^[[:space:]]*//' "${DEB}/DEBIAN/postinst"
           chmod 755 "${DEB}/DEBIAN/postinst"
           dpkg-deb --root-owner-group --build "${DEB}" "${PKG}.deb"
 
