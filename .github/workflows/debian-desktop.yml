@@ -218,7 +218,7 @@ jobs:
           sudo tee "${ROOTFS_DIR}/etc/os-release" > /dev/null << 'OSREL_EOF'
           PRETTY_NAME="Debian GNU/Linux ${{ github.event.inputs.debian_release }}"
           NAME="Debian GNU/Linux"
-          VERSION_CODENAME=${{ github.event.inputs.debian_release }}-desktop
+          VERSION_CODENAME=${{ github.event.inputs.debian_release }}_desktop
           ID=debian
           HOME_URL="https://www.debian.org/"
           SUPPORT_URL="https://www.debian.org/support"
