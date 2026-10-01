@@ -214,7 +214,17 @@ jobs:
             printf '#!/bin/sh -e\nexit 0\n' | sudo tee "${ROOTFS_DIR}/etc/rc.local" > /dev/null
             sudo chmod +x "${ROOTFS_DIR}/etc/rc.local"
           fi
-
+          
+          sudo tee "${ROOTFS_DIR}/etc/os-release" > /dev/null << 'OSREL_EOF'
+          PRETTY_NAME="Debian GNU/Linux ${{ github.event.inputs.debian_release }}"
+          NAME="Debian GNU/Linux"
+          VERSION_CODENAME=${{ github.event.inputs.debian_release }}-desktop
+          ID=debian
+          HOME_URL="https://www.debian.org/"
+          SUPPORT_URL="https://www.debian.org/support"
+          BUG_REPORT_URL="https://bugs.debian.org/"
+          OSREL_EOF
+          
           sudo chroot "${ROOTFS_DIR}" bash -c '
             systemctl enable ssh 2>/dev/null || systemctl enable sshd 2>/dev/null || true
             systemctl enable NetworkManager
