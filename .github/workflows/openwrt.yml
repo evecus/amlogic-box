@@ -201,6 +201,11 @@ jobs:
           rm -f /tmp/openwrt-rootfs.tar.gz
           echo "▶ 解压完成: $(sudo du -sh ${ROOTFS_DIR} | awk '{print $1}')"
 
+          # 补建 opkg 运行目录。rootfs 内 /var -> tmp（符号链接），正常系统由
+          # procd 在启动时创建 /tmp/lock 等子目录；chroot 无 init，缺了会导致
+          # opkg_conf_load 写锁文件直接失败: /var/lock/opkg.lock: No such file
+          sudo mkdir -p "${ROOTFS_DIR}/var/lock" "${ROOTFS_DIR}/var/opkg-lists"
+
           # ── 包管理器检测：24.10 及更早用 opkg，25.12+ 用 apk ─────────
           if [[ -x "${ROOTFS_DIR}/usr/bin/apk" || -x "${ROOTFS_DIR}/bin/apk" ]]; then
             PKG_MGR="apk"
@@ -319,7 +324,7 @@ jobs:
           if [[ "${PKG_MGR}" == "apk" ]]; then
             sudo chroot "${ROOTFS_DIR}" /bin/sh -c "rm -rf /var/cache/apk/* 2>/dev/null || true"
           else
-            sudo chroot "${ROOTFS_DIR}" /bin/sh -c "rm -rf /var/cache/opkg/* /var/opkg-lists/* 2>/dev/null || true"
+            sudo chroot "${ROOTFS_DIR}" /bin/sh -c "rm -rf /var/cache/opkg/* /var/opkg-lists/* /var/lock/* 2>/dev/null || true"
           fi
 
           # ── root 密码（OpenWrt 同样用 /etc/shadow, musl crypt 支持 \$6\$）──
