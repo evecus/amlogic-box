@@ -1,24 +1,98 @@
-name: Build Kernel
+name: Build Kernel (Amlogic)
 
 on:
-  workflow_dispatch: # 手动触发
+  workflow_dispatch:
+    # 手动触发: 不检测, 无条件按 inputs 构建
     inputs:
       version:
-        description: "Release version (e.g. 6.18.50)"
+        description: "Release version (e.g. 7.2.8)"
         required: true
-        default: '7.2.'
+        default: '7.2.8'
         type: string
       kernel_sign:
         description: '内核版本后缀(可留空)'
         required: false
         default: 'alice'
+        type: string
+  schedule:
+    - cron: '0 18 * * *'   # 每天 UTC 18:00 = 北京 2:00
 
 permissions:
   contents: write
 
+env:
+  MAJOR: "7.2"   # ★ 定时检测跟踪的大版本号, 改这里即可
+
 jobs:
+  check:
+    # ★ 只在定时触发时才做检测; 手动触发时整个 job 被 skip
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: kernel
+          token: ${{ secrets.GITHUB_TOKEN }}   # 允许后面 push 版本文件
+
+      - name: Check latest kernel version
+        id: check
+        env:
+          MAJOR: ${{ env.MAJOR }}
+        run: |
+          # 1) 取 kernel.org 该大版本下的最新版
+          LATEST=$(curl -fsSL https://www.kernel.org/releases.json \
+            | jq -r --arg pre "${MAJOR}." \
+              '[.releases[].version | select(startswith($pre))]'
+            | sort -V | tail -n1)
+
+          if [ -z "$LATEST" ]; then
+            echo "!! kernel.org 上没找到 ${MAJOR}.x 的版本"; exit 1
+          fi
+          echo "kernel.org ${MAJOR}.x 最新: ${LATEST}"
+
+          # 2) 读仓库里已存的版本号 (文件不存在则视为空 = 需要构建)
+          SAVED=""
+          [ -f LATEST_VERSION ] && SAVED=$(tr -d '[:space:]' < LATEST_VERSION)
+          echo "仓库已存版本: ${SAVED:-<无文件, 首次运行>}"
+
+          # 3) 版本比较
+          if [ "$(printf '%s\n%s\n' "$SAVED" "$LATEST" | sort -V | tail -n1)" = "$LATEST" ] \
+             && [ "$SAVED" != "$LATEST" ]; then
+            echo "发现新版本: ${SAVED:-无} -> ${LATEST}, 开始构建"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "无更新, 跳过构建"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=${LATEST}" >> "$GITHUB_OUTPUT"
+
+      # ★ 只有定时检测发现新版本才写文件并 push (推回 kernel 分支)
+      - name: Commit version file
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          echo "${{ steps.check.outputs.version }}" > LATEST_VERSION
+          git add LATEST_VERSION
+          git commit -m "chore: update kernel version to ${{ steps.check.outputs.version }}"
+          git push
+
   build:
+    needs: check
+    # ★ 手动触发: check 为 skipped -> 无条件构建
+    # ★ 定时触发: check 通过且 changed=true -> 构建
+    if: >-
+      always() &&
+      (needs.check.result == 'skipped' || needs.check.outputs.changed == 'true')
     runs-on: ubuntu-24.04-arm
+    env:
+      # 手动触发用 inputs.version; 定时触发用 check 检测到的版本
+      KVERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || needs.check.outputs.version }}
+      KSIGN: ${{ github.event.inputs.kernel_sign || 'alice' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,19 +101,17 @@ jobs:
 
       - name: Download stable kernel source
         run: |
-          V="${{ github.event.inputs.version }}"
+          V="${KVERSION}"
           MAJOR="${V%%.*}"
           wget -q "https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/linux-${V}.tar.xz"
-          tar -xf "linux-${{ github.event.inputs.version }}.tar.xz"
-          mv "linux-${{ github.event.inputs.version }}" linux
+          tar -xf "linux-${V}.tar.xz"
+          mv "linux-${V}" linux
 
       - name: Apply Amlogic vendor u-boot text_offset patch
         working-directory: linux
         run: |
           # ophub/flippy 补丁: Image 头 text_offset=0x1080000
-          # N1 vendor u-boot 按此字段放置内核, vanilla 的 0 会导致秒崩→WDT 复位循环
           patch -p1 --batch < ../kernel-config/0001-arm64-image-text_offset-0x1080000-amlogic-vendor-uboot.patch
-          # 打完补丁必须重跑, 否则 Image 头不会带上新字段
           grep -n "TEXT_OFFSET 0x01080000" arch/arm64/kernel/image.h
           grep -n "le64sym.*_kernel_offset_le" arch/arm64/kernel/head.S
 
@@ -47,7 +119,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison flex libssl-dev libelf-dev \
-            dwarves kmod cpio zstd lz4 udev initramfs-tools u-boot-tools rsync
+            dwarves kmod cpio zstd lz4 udev initramfs-tools u-boot-tools rsync jq
 
       - name: Configure kernel (defconfig + slim-amlogic + amlogic fragments)
         working-directory: linux
@@ -58,21 +130,19 @@ jobs:
             ../kernel-config/amlogic.fragment
           make ARCH=arm64 olddefconfig
 
-      - name: Apply kernel sign (写入 CONFIG_LOCALVERSION,影响 uname -r)
+      - name: Apply kernel sign (写入 CONFIG_LOCALVERSION, 影响 uname -r)
         working-directory: linux
         run: |
-          SIGN="${{ github.event.inputs.kernel_sign }}"
-          # 无论是否有后缀，都禁用 LOCALVERSION_AUTO，防止 git 状态附加 "+"
           ./scripts/config --disable CONFIG_LOCALVERSION_AUTO
-          if [ -n "$SIGN" ]; then
-            ./scripts/config --set-str CONFIG_LOCALVERSION "-${SIGN}"
+          if [ -n "${KSIGN}" ]; then
+            ./scripts/config --set-str CONFIG_LOCALVERSION "-${KSIGN}"
           else
             ./scripts/config --set-str CONFIG_LOCALVERSION ""
           fi
           make ARCH=arm64 olddefconfig
           echo "kernelrelease = $(make ARCH=arm64 kernelrelease LOCALVERSION=)"
 
-      - name: Embed WiFi/BT firmware into kernel (仓库有 kernel-firmware/brcm 才启用)
+      - name: Embed WiFi/BT firmware into kernel
         working-directory: linux
         run: |
           if [ -d ../kernel-firmware/brcm ] && ls ../kernel-firmware/brcm/* >/dev/null 2>&1; then
@@ -82,7 +152,7 @@ jobs:
             make ARCH=arm64 olddefconfig
             echo "已嵌入固件: $FWLIST"
           else
-            echo "!! kernel-firmware/brcm 不存在或为空,跳过固件内嵌"
+            echo "!! kernel-firmware/brcm 不存在或为空, 跳过固件内嵌"
           fi
 
       - name: Build Image
@@ -93,21 +163,20 @@ jobs:
       - name: Verify Image text_offset (must be 0x1080000)
         working-directory: linux
         run: |
-          # 最终产物强校验: text_offset 错了在 CI 就 fail, 避免刷到板子上才发现循环重启
           TO=$(python3 -c "import struct;print(hex(struct.unpack('<Q',open('arch/arm64/boot/Image','rb').read(16)[8:16])[0]))")
           echo "Image text_offset = $TO"
-          [ "$TO" = "0x1080000" ] || { echo "!! text_offset 不是 0x1080000, text_offset 补丁未生效"; exit 1; }
+          [ "$TO" = "0x1080000" ] || { echo "!! text_offset 补丁未生效"; exit 1; }
 
-      - name: Generate initrd.img / uInitrd (ophub 式, 复刻 generate_uinitrd)
+      - name: Generate initrd.img / uInitrd (ophub 式)
         run: |
           KVER=$(cd linux && make ARCH=arm64 kernelrelease LOCALVERSION=)
-          # 1) 新内核文件进系统 /boot (ophub: copy kernel files into armbian system)
+
           sudo mkdir -p /boot
           sudo cp linux/System.map "/boot/System.map-${KVER}"
           sudo cp linux/.config "/boot/config-${KVER}"
           sudo cp linux/arch/arm64/boot/Image "/boot/vmlinuz-${KVER}"
           sudo cp linux/arch/arm64/boot/Image "/boot/Image"
-          # 3) COMPRESS=gzip + 99-uboot 钩子 (mkimage -> uInitrd), 与 ophub common-files 相同
+
           sudo sed -i "s|^COMPRESS=.*|COMPRESS=gzip|g" /etc/initramfs-tools/initramfs.conf
           sudo mkdir -p /etc/initramfs/post-update.d
           sudo tee /etc/initramfs/post-update.d/99-uboot > /dev/null << 'EOF'
@@ -118,12 +187,12 @@ jobs:
             -d "/boot/initrd.img-${K_VER}" "/boot/uInitrd-${K_VER}"
           EOF
           sudo chmod +x /etc/initramfs/post-update.d/99-uboot
-          # 4) 删除 runner 上的 flash-kernel 钩子(与 VPS/开发板无关, 必然失败且中断 run-parts)
           sudo rm -f /etc/initramfs/post-update.d/flash-kernel
-          # 5) 生成 (firmware W: 警告为 initramfs-tools 提示 builtin 驱动缺固件, 无害可忽略)
+
           sudo update-initramfs -c -k "${KVER}"
           ls -l "/boot/initrd.img-${KVER}" "/boot/uInitrd-${KVER}"
           [[ -f "/boot/uInitrd-${KVER}" ]] || { echo "uInitrd 生成失败"; exit 1; }
+
           mkdir -p boot-extra
           cp "/boot/initrd.img-${KVER}" boot-extra/
           cp "/boot/uInitrd-${KVER}" boot-extra/
@@ -133,7 +202,7 @@ jobs:
           KVER=$(cd linux && make ARCH=arm64 kernelrelease LOCALVERSION=)
           PKG="amlogic-kernel-${KVER}"
 
-          # --- tar.gz: ophub 布局, dtb/amlogic/ 与 armbian /boot/dtb 对应 ---
+          # --- tar.gz: ophub 布局 ---
           mkdir -p "${PKG}"
           cp linux/arch/arm64/boot/Image "${PKG}/"
           cp boot-extra/initrd.img-${KVER} "${PKG}/initrd.img" 2>/dev/null || true
@@ -141,20 +210,15 @@ jobs:
           cp linux/.config "${PKG}/kernel-config"
           tar -czf "${PKG}.tar.gz" "${PKG}"
 
-          # --- deb 包 (linux-image 布局, dpkg -i 直接安装; 通用包带全部 dtb) ---
-          # 注意: ophub Amlogic 镜像的 /boot 是 vfat, 不支持硬链接, 任何 dpkg 拥有的
-          # /boot 文件在升级(同包名重装)时 dpkg 做 backup link 都会报
-          # "unable to make backup link ... Operation not permitted"。
-          # 故 dtb 与内核文件 (zImage/kernel-config/uInitrd) 全部装到
-          # /usr/lib/linux-image-${KVER}/ (ext4), 由 postinst cp -f 到 /boot。
+          # --- deb 包: 文件装到 /usr/lib, postinst cp 到 /boot (vfat 兼容) ---
           DEB="linux-image-amlogic"
           LIBDIR="usr/lib/linux-image-${KVER}"
           mkdir -p "${DEB}/DEBIAN" \
-                   "${DEB}/${LIBDIR}" \
-                   "${DEB}/usr/share/doc/${DEB}"
-          cp linux/arch/arm64/boot/Image       "${DEB}/${LIBDIR}/zImage"
-          cp linux/.config                     "${DEB}/${LIBDIR}/kernel-config"
-          cp boot-extra/uInitrd-${KVER}    "${DEB}/${LIBDIR}/uInitrd"    2>/dev/null || true
+            "${DEB}/${LIBDIR}" \
+            "${DEB}/usr/share/doc/${DEB}"
+          cp linux/arch/arm64/boot/Image "${DEB}/${LIBDIR}/zImage"
+          cp linux/.config "${DEB}/${LIBDIR}/kernel-config"
+          cp boot-extra/uInitrd-${KVER} "${DEB}/${LIBDIR}/uInitrd" 2>/dev/null || true
           [[ -f "${DEB}/${LIBDIR}/uInitrd" ]] || { echo "!! deb 缺少 uInitrd"; exit 1; }
 
           cat > "${DEB}/DEBIAN/control" << EOF
@@ -167,28 +231,27 @@ jobs:
           Section: kernel
           Priority: optional
           Description: Amlogic TV boxes kernel ${KVER} (mainline ${KVER%%-*}, all-builtin, wired-first, HDMI enabled)
+
           Boards: Phicomm-N1 (S905D), CM311-1a-YST (S905L3A), M302A (S905L3B) and same-family boxes
           EOF
 
           cat > "${DEB}/DEBIAN/postinst" << EOF
           #!/bin/sh
           set -e
-          # 把内核文件铺到 /boot (vfat 不支持硬链接, 不能作为 dpkg 拥有的文件, 见上)
-          # uEnv.txt 引用固定文件名 zImage/uInitrd, 首装/升级均直接覆盖
           LIBDIR="/usr/lib/linux-image-${KVER}"
           if [ -f "\${LIBDIR}/zImage" ] && [ -f "\${LIBDIR}/uInitrd" ] && [ -d /boot ]; then
-              cp -f "\${LIBDIR}/zImage"        /boot/zImage
-              cp -f "\${LIBDIR}/kernel-config" /boot/kernel-config
-              cp -f "\${LIBDIR}/uInitrd"       /boot/uInitrd
-              sync
+            cp -f "\${LIBDIR}/zImage" /boot/zImage
+            cp -f "\${LIBDIR}/kernel-config" /boot/kernel-config
+            cp -f "\${LIBDIR}/uInitrd" /boot/uInitrd
+            sync
           fi
           exit 0
           EOF
           chmod 755 "${DEB}/DEBIAN/postinst"
-
           dpkg-deb --root-owner-group --build "${DEB}" "${PKG}.deb"
-          echo "PKG_TAR=${PKG}.tar.gz"  >> $GITHUB_ENV
-          echo "PKG_DEB=${PKG}.deb"     >> $GITHUB_ENV
+
+          echo "PKG_TAR=${PKG}.tar.gz" >> $GITHUB_ENV
+          echo "PKG_DEB=${PKG}.deb" >> $GITHUB_ENV
 
       - name: Release
         uses: softprops/action-gh-release@v2
