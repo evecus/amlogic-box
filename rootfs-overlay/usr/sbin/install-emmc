@@ -186,12 +186,12 @@ load_board_conf() {
     echo -e "${STEPS} Loading board configuration..."
 
     [[ -s "${board_conf}" ]] || error_msg "[ ${board_conf} ] file is missing! Not a rebuild image?"
-    boxid="$(grep -E '^BOX_ID=' "${board_conf}" | cut -d= -f2- | tr -d '[:space:]')"
+    boxid="$(grep -E '^BOX_ID=' "${board_conf}" | cut -d= -f2- | sed 's/[[:space:]]//g')"
     MODEL_NAME="$(grep -E '^MODEL_NAME=' "${board_conf}" | cut -d= -f2-)"
-    AMLOGIC_SOC="$(grep -E '^SOC=' "${board_conf}" | cut -d= -f2- | tr -d '[:space:]')"
-    FDTFILE="$(grep -E '^FDTFILE=' "${board_conf}" | cut -d= -f2- | tr -d '[:space:]')"
-    UBOOT_OVERLOAD="$(grep -E '^UBOOT_OVERLOAD=' "${board_conf}" | cut -d= -f2- | tr -d '[:space:]')"
-    BOOTLOADER_IMG="$(grep -E '^BOOTLOADER_IMG=' "${board_conf}" | cut -d= -f2- | tr -d '[:space:]')"
+    AMLOGIC_SOC="$(grep -E '^SOC=' "${board_conf}" | cut -d= -f2- | sed 's/[[:space:]]//g')"
+    FDTFILE="$(grep -E '^FDTFILE=' "${board_conf}" | cut -d= -f2- | sed 's/[[:space:]]//g')"
+    UBOOT_OVERLOAD="$(grep -E '^UBOOT_OVERLOAD=' "${board_conf}" | cut -d= -f2- | sed 's/[[:space:]]//g')"
+    BOOTLOADER_IMG="$(grep -E '^BOOTLOADER_IMG=' "${board_conf}" | cut -d= -f2- | sed 's/[[:space:]]//g')"
 
     [[ -n "${boxid}" && -n "${AMLOGIC_SOC}" && -n "${FDTFILE}" && -n "${UBOOT_OVERLOAD}" ]] || error_msg "[ ${board_conf} ] is incomplete, cannot continue."
 
