@@ -111,7 +111,7 @@ jobs:
         working-directory: linux
         run: |
           # ophub/flippy 补丁: Image 头 text_offset=0x1080000
-          patch -p1 --batch < ../kernel-config/0001-arm64-image-text_offset-0x1080000-amlogic-vendor-uboot.patch
+          patch -p1 --batch < ../kernel-config/0x1080000.patch
           grep -n "TEXT_OFFSET 0x01080000" arch/arm64/kernel/image.h
           grep -n "le64sym.*_kernel_offset_le" arch/arm64/kernel/head.S
 
