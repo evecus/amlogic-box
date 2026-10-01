@@ -480,6 +480,29 @@ tmpfs                  /tmp     tmpfs                  defaults,nosuid          
 
 EOF
 
+    # OpenWrt 目标系统: /etc/fstab 不生效, 需同步改写 uci fstab (block-mount)。
+    # 用新格式化的 eMMC boot 分区 UUID, 否则 eMMC 启动后 /boot 挂不上,
+    # 后续升级内核或再次安装时读不到 /boot/board.conf / /boot/zImage。
+    if [[ -f "${DIR_INSTALL}/etc/openwrt_release" ]]; then
+        echo -e "${INFO} Generate the uci fstab for OpenWrt."
+        NEW_BOOT_UUID="$(lsblk -no UUID ${PART_BOOT} 2>/dev/null | head -1)"
+        cat >${DIR_INSTALL}/etc/config/fstab <<EOF
+config global
+	option anon_swap '0'
+	option auto_swap '1'
+	option auto_mount '1'
+	option check_fs '1'
+
+config mount
+	option target '/boot'
+	option uuid '${NEW_BOOT_UUID}'
+	option fstype 'vfat'
+	option options 'rw,noatime'
+	option enabled '1'
+	option enabled_fsck '0'
+EOF
+    fi
+
     # Remove useless scripts
     rm -f ${DIR_INSTALL}/usr/sbin/armbian-tf
     rm -f ${DIR_INSTALL}/root/.no_rootfs_resize
