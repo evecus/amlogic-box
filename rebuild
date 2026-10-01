@@ -165,11 +165,9 @@ fi
 rm -f "$RS/etc/resolv.conf"; echo "nameserver 223.5.5.5" > "$RS/etc/resolv.conf"
 
 # eMMC 安装/调度脚本 — 来自 rootfs-overlay (install-emmc/ampart/balethirq/sysctl 等, 移植自 ophub)
-# Arch merged-usr: /usr/sbin -> bin (symlink), 不能把目录覆盖到 symlink 上;
-# 检测到 OS_ID=arch 时, 把 overlay 的 usr/sbin 内容落到真实目录 usr/bin
 OVERLAY="${SCRIPT_DIR}/rootfs-overlay"
-if [[ "${OS_ID}" == "arch" ]]; then
-    echo "Arch merged-usr: overlay usr/sbin -> usr/bin"
+if [[ "${OS_ID}" == "archlinux" ]]; then
+    echo "Archlinux merged-usr: overlay usr/sbin -> usr/bin"
     # 先拷除 usr 以外的顶层项
     for item in "$OVERLAY"/*; do
         [[ -e "$item" ]] || continue
