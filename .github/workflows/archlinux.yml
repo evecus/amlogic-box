@@ -433,8 +433,8 @@ jobs:
           NAME="Arch Linux ARM"
           ID=archlinux
           ID_LIKE=archlinux
-          VERSION_CODENAME=latest
-          VERSION_ID=latest
+          VERSION_CODENAME=rolling
+          VERSION_ID=rolling
           PRETTY_NAME="Arch Linux ARM"
           ANSI_COLOR="38;2;23;147;209"
           HOME_URL="https://archlinuxarm.org/"
