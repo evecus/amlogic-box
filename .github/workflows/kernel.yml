@@ -1,4 +1,4 @@
-name: Build Kernel (Amlogic)
+name: Build Kernel
 
 on:
   workflow_dispatch:
