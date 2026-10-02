@@ -43,14 +43,18 @@ jobs:
         env:
           MAJOR: ${{ env.MAJOR }}
         run: |
-          # 1) 取 kernel.org 该大版本下的最新版
+          # 1) 取 kernel.org 该大版本下的最新版 (仅 stable / longterm, 排除 mainline / rc / linux-next)
           LATEST=$(curl -fsSL https://www.kernel.org/releases.json \
-            | jq -r --arg pre "${MAJOR}." \
-              '[.releases[].version | select(startswith($pre))]'
+            | jq -r --arg pre "${MAJOR}." '
+                .releases[]
+                | select(.moniker == "stable" or .moniker == "longterm")
+                | .version
+                | select(startswith($pre))
+                | select(test("^[0-9]+(\\.[0-9]+)*$"))' \
             | sort -V | tail -n1)
 
           if [ -z "$LATEST" ]; then
-            echo "!! kernel.org 上没找到 ${MAJOR}.x 的版本"; exit 1
+            echo "!! kernel.org 上没找到 ${MAJOR}.x 的 stable/longterm 版本"; exit 1
           fi
           echo "kernel.org ${MAJOR}.x 最新: ${LATEST}"
 
