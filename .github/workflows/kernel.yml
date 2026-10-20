@@ -7,7 +7,7 @@ on:
       version:
         description: "Release version (e.g. 7.2.8)"
         required: true
-        default: '7.2.8'
+        default: '7.3'
         type: string
       kernel_sign:
         description: '内核版本后缀(可留空)'
@@ -21,7 +21,7 @@ permissions:
   contents: write
 
 env:
-  MAJOR: "7.2"   # ★ 定时检测跟踪的大版本号, 改这里即可
+  MAJOR: "7.3"   # ★ 定时检测跟踪的大版本号, 改这里即可
 
 jobs:
   check:
