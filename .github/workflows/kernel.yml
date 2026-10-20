@@ -131,6 +131,7 @@ jobs:
           make ARCH=arm64 defconfig
           ./scripts/kconfig/merge_config.sh -m .config \
             ../kernel-config/slim.fragment \
+            ../kernel-config/slimx.fragment \
             ../kernel-config/save.fragment
           make ARCH=arm64 olddefconfig
 
