@@ -154,7 +154,7 @@ jobs:
             apt-get install -y \
               openssh-server sudo curl wget ca-certificates \
               locales tzdata binutils bluez \
-              iproute2 network-manager \
+              iproute2 \
               net-tools iputils-ping dnsutils \
               wireless-tools chrony bc \${NMTUI_PKG} \
               bash-completion htop nano nftables \
@@ -164,11 +164,7 @@ jobs:
               wireless-regdb rsync \
               --no-install-recommends
             apt-get install -y wpasupplicant
-            # 验证关键包
-            dpkg -l openssh-server network-manager rsync | grep -c '^ii' | grep -q '^3$' || {
-              echo 'ERROR: 关键包安装不完整'
-              exit 1
-            }
+            apt-get install -y systemd-resolved
             apt-get clean && rm -rf /var/lib/apt/lists/*
           "
           # ── 额外包 ────────────────────────────────────────────────────
@@ -201,12 +197,6 @@ jobs:
           # ── root 密码 ─────────────────────────────────────────────────
           ROOT_HASH="$(openssl passwd -6 "${ROOT_PASSWORD}")"
           sudo sed -i "s|^root:[^:]*|root:${ROOT_HASH}|" "${ROOTFS_DIR}/etc/shadow"
-          # ── 网络 ──────────────────────────────────────────────────────
-          sudo mkdir -p "${ROOTFS_DIR}/etc/NetworkManager"
-          echo 'W21haW5dCnBsdWdpbnM9aWZ1cGRvd24sa2V5ZmlsZQpkaGNwPWludGVybmFsCltpZnVwZG93bl0KbWFuYWdlZD10cnVlCg==' \
-            | base64 -d | sudo tee "${ROOTFS_DIR}/etc/NetworkManager/NetworkManager.conf" > /dev/null
-          printf 'auto lo\niface lo inet loopback\n' \
-            | sudo tee "${ROOTFS_DIR}/etc/network/interfaces" > /dev/null
           # ── systemd 超时 ──────────────────────────────────────────────
           SYS_CONF="${ROOTFS_DIR}/etc/systemd/system.conf"
           [[ -f "${SYS_CONF}" ]] && {
@@ -220,14 +210,12 @@ jobs:
           fi
           # ── enable 服务 ───────────────────────────────────────────────
           sudo chroot "${ROOTFS_DIR}" systemctl enable ssh
-          sudo chroot "${ROOTFS_DIR}" systemctl enable NetworkManager
-          sudo chroot "${ROOTFS_DIR}" systemctl enable NetworkManager-dispatcher
           sudo chroot "${ROOTFS_DIR}" systemctl enable chrony
           sudo chroot "${ROOTFS_DIR}" systemctl enable nftables
           # ── disable 不需要的服务 ──────────────────────────────────────
           sudo chroot "${ROOTFS_DIR}" systemctl disable networking.service                2>/dev/null || true
-          sudo chroot "${ROOTFS_DIR}" systemctl disable systemd-networkd
-          sudo chroot "${ROOTFS_DIR}" systemctl disable NetworkManager-wait-online.service 2>/dev/null || true
+          sudo chroot "${ROOTFS_DIR}" systemctl enable systemd-networkd
+          sudo chroot "${ROOTFS_DIR}" systemctl enable systemd-resolved
           sudo chroot "${ROOTFS_DIR}" systemctl disable e2scrub_reap.service              2>/dev/null || true
           sudo chroot "${ROOTFS_DIR}" systemctl disable systemd-pstore.service            2>/dev/null || true
           sudo chroot "${ROOTFS_DIR}" truncate -s 0 /etc/motd
